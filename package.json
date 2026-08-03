@@ -1,21 +1,24 @@
 {
   "name": "ashan-frp-control-center",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build:web": "tsc -p src/web/tsconfig.json",
-    "build": "npm run build:web",
+    "build:frontend": "cd frontend && npm ci --no-audit && npm run build",
+    "build": "npm run build:frontend",
     "start": "node --experimental-strip-types src/server/index.ts",
     "dev": "node --watch --experimental-strip-types src/server/index.ts",
+    "dev:frontend": "cd frontend && npm run dev",
     "test": "node --test tests/*.test.mjs",
-    "verify": "npm run build && npm test"
+    "verify": "npm run build && npm test",
+    "docker:build": "docker build -t ashan-frp-control-center:dev .",
+    "docker:up": "docker compose up -d --build"
   },
   "engines": {
     "node": ">=22.5.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
-    "typescript": "^7.0.2"
+    "typescript": "^5.7.3",
+    "@types/node": "^22.10.0"
   }
 }
