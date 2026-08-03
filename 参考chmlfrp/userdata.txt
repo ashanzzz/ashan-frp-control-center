@@ -1,0 +1,19 @@
+{
+  "cloudflare": {
+    "email": "zeros@vip.qq.qom",
+    "api_token": "0Emhd5FTMeba6kT1p07E-Fp1-phXQjWA2GdPZFES",
+    "zone_id": "9635e4672ef9d6cc76f8e624514d3bc8"
+  },
+  "chmlfrp": {
+    "username": "ashanzzz",
+    "password": "Qq335356119.",
+    "oauth2": {
+      "enabled": true,
+      "client_id": "019d534218e67f8a862056c1efb869db",
+      "client_secret": "0a98ee0b7c69daa4c4922bae9be5df95eff6",
+      "access_token": "eyJraWQiOiI3MzBiZGRmNC0zMjBjLTQ1MTItYjgxMy03OWM5ODE3NTVhMGYiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMzBmN2M4NzFhNjc0YzUxOGI4MjEzZGM4OTcwZjQyMyIsImF1ZCI6ImNobWxmcnAtYXBpIiwibmJmIjoxNzc2MjIxNjMzLCJzY29wZSI6WyJjaG1sZnJwX2FwaSJdLCJpc3MiOiJodHRwczovL2FjY291bnQtYXBpLnF6aHVhLm5ldCIsImV4cCI6MTc3NjIyMjIzMywiaWF0IjoxNzc2MjIxNjMzLCJqdGkiOiIyNGQ4OTI3Mi03NzY4LTRhOTMtOTIxMS0yMzQ3YzRkZGFjOTEiLCJjbGllbnRfaWQiOiIwMTlkNTM0MjE4ZTY3ZjhhODYyMDU2YzFlZmI4NjlkYiJ9.2fsD7uJaYNWqB_khToC0GQc-HrKRE8bTte-P43zFzCAMvKaqrNrc7D_gV1c53RGivaTqb9BmuheuMrY2bDzNWK48ZGJRGk5SBwekFnguvwAnsW_vPs6mHt1o-ohXUqm_KCkIsnj3i4DoA4YanN5neQxV_MzNXO7LMkwc-wOYGDEugnHBNjLrmMQxmhwa0GN1Pex7lmttSijHAPuedqExFooGvUtxxim5uzsu307Cbi7yKJ9cB-aPWYYZQy3enw_eahI2Zazix0OJrE4sD8MQN6j6f9axDEasY3RDr2DMIEnuRH3eda5sWdjw2DOFRUU1nIUzA58Y5yBfI28A9ehseQ",
+      "refresh_token": "HqxCRYQqNGbtwHyA2JQ-2GT9fMrGIzOWqIlyhYI08dfays8-JnWyWioGfSKCx9o-cBPtSBj_hvpsOkAkGC4Y64RUIhER-BgW3dlvDSupgWoZ_ICcq00jCk2jKNQ736YA",
+      "token_expires_at": 1776222232
+    }
+  }
+}

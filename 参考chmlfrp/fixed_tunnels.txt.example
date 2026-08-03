@@ -1,0 +1,20 @@
+[
+  {
+    "name": "example_https",
+    "tunnel_local_ip": "192.168.1.10",
+    "tunnel_local_port": "30001",
+    "tunnel_type": "https",
+    "tunnel_remote_port": "",
+    "dns_domain_cname": "app",
+    "dns_proxied": false
+  },
+  {
+    "name": "example_tcp",
+    "tunnel_local_ip": "192.168.1.10",
+    "tunnel_local_port": "22",
+    "tunnel_type": "tcp",
+    "tunnel_remote_port": "40022",
+    "dns_domain_cname": "ssh",
+    "dns_proxied": false
+  }
+]

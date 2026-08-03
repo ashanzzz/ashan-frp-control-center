@@ -1,0 +1,12 @@
+import { getCredential, getSetting, putCache, cacheError } from '../state.ts'
+import { ProviderError, request } from '../provider-http.ts'
+import { text } from '../util.ts'
+
+type GqlType={kind:string;name?:string|null;ofType?:GqlType|null}
+type MutationField={name:string;description?:string;args:Array<{name:string;type:GqlType}>;type:GqlType}
+function endpoint():string{const base=text(getSetting('unraid.base_url','')).replace(/\/$/,'');if(!base)throw new ProviderError('UNRAID_NOT_CONFIGURED','请配置Unraid地址',400);const path=text(getSetting('unraid.graphql_path','/graphql'))||'/graphql';return `${base}${path.startsWith('/')?'':'/'}${path}`}
+export async function graphql<T=any>(query:string,variables:Record<string,unknown>={}):Promise<T>{const key=getCredential('unraid','api_key');if(!key)throw new ProviderError('UNRAID_KEY_MISSING','请保存Unraid API Key',400);const result=await request(endpoint(),{method:'POST',headers:{'content-type':'application/json','x-api-key':key},body:JSON.stringify({query,variables}),timeoutMs:Number(getSetting('unraid.timeout_ms',15000))});const body=result.json;if(body?.errors?.length)throw new ProviderError('UNRAID_GRAPHQL_ERROR',body.errors.map((x:any)=>x.message).join('；'),502,body.errors);if(!body?.data)throw new ProviderError('UNRAID_GRAPHQL_EMPTY','Unraid GraphQL没有返回data',502,body);return body.data as T}
+export async function testUnraid(){try{const data=await graphql(`query AshanFrpTest{info{os{platform distro release uptime}} dockerContainers{id names state status autoStart}}`);putCache('unraid.connection','unraid',data,60);return data}catch(e){cacheError('unraid.connection','unraid',e instanceof Error?e.message:'Unraid连接失败');throw e}}
+export async function containers():Promise<any[]>{const data=await graphql<any>(`query AshanFrpContainers{dockerContainers{id names state status autoStart image}}`);const list=data.dockerContainers||[];putCache('unraid.containers','unraid',list,30);return list}
+function typeText(type:GqlType):string{if(type.kind==='NON_NULL')return `${typeText(type.ofType!)}!`;if(type.kind==='LIST')return `[${typeText(type.ofType!)}]`;return type.name||'String'}
+export async function mutationFields():Promise<MutationField[]>{const data=await graphql<any>(`query AshanFrpMutations{__schema{mutationType{fields{name description args{name type{kind name ofType{kind name ofType{kind name ofType{kind name}}}}} type{kind name ofType{kind name}}}}}}`);const fields=data.__schema?.mutationType?.fields||[];putCache('unraid.mutations','unraid',fields,3600);return fields}

@@ -1,0 +1,30 @@
+services:
+  ashan-frp-control:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        FRP_VERSION: "0.70.1"
+    image: ashan-frp-control-center:1.1.0
+    container_name: ashan-frp-control
+    network_mode: host
+    environment:
+      HTTP_HOST: "0.0.0.0"
+      HTTP_PORT: "8080"
+      DATA_DIR: "/data"
+      PUBLIC_DIR: "/app/public"
+      FRPC_BINARY_PATH: "/usr/local/bin/frpc"
+      FRPC_CONFIG_PATH: "/data/frpc/conf/frpc.toml"
+      FRPC_BACKUP_DIR: "/data/backups/frpc"
+      FRPC_LOG_PATH: "/data/frpc/logs/frpc.log"
+      COOKIE_SECURE: "false"
+      NODE_NO_WARNINGS: "1"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/auth/status >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

@@ -1,0 +1,6 @@
+{
+  "status": "online",
+  "reason": "ok",
+  "details": "container running; config ok; probes ok",
+  "ts": 1776221702
+}

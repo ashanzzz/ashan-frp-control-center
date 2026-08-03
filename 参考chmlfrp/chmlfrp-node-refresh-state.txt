@@ -1,0 +1,7 @@
+{
+  "ts": 1776221491,
+  "all_nodes_file": "/mnt/user/Hdd_Disk_Share/脚本日志/chmlfrp/chmlfrp-nodes-all.txt",
+  "filtered_nodes_file": "/mnt/user/Hdd_Disk_Share/脚本日志/chmlfrp/chmlfrp-nodes-filtered.txt",
+  "total_before": 36,
+  "total_after": 16
+}

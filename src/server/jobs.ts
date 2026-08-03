@@ -1,0 +1,52 @@
+import { all, one, run } from './db.ts'
+import { emitEvent } from './events.ts'
+import { id, json, nowIso, safeError, sleep } from './util.ts'
+import { audit } from './state.ts'
+import { syncNodes, testAllNodes } from './services/nodes.ts'
+import { syncObservedTunnels, buildTunnelPlan, applyTunnelPlan } from './services/tunnels.ts'
+import { syncObservedDns, buildDnsPlan, applyDnsPlan, deriveDns } from './services/dns.ts'
+import { healthCheck } from './services/health.ts'
+import { buildSwitchPlan, executeSwitch } from './services/switch.ts'
+import { action as runtimeAction } from './providers/runtime.ts'
+import { ensureAuth, refreshToken } from './providers/chmlfrp.ts'
+import { getSetting, setSetting } from './state.ts'
+
+type HandlerContext={job:any;payload:any;event:(type:string,message:string,payload?:unknown,level?:string)=>void}
+type Handler=(ctx:HandlerContext)=>Promise<unknown>
+const handlers=new Map<string,Handler>()
+let runnerStarted=false
+
+export function registerJobHandler(type:string,handler:Handler){handlers.set(type,handler)}
+export function enqueueJob(type:string,payload:unknown={},options:{targetType?:string;targetId?:string;idempotencyKey?:string;priority?:number;maxAttempts?:number;requestedBy?:string;runAfter?:string}={}){
+  if(options.idempotencyKey){const existing=one(`SELECT * FROM jobs WHERE idempotency_key=? AND status IN ('queued','running','retry_wait')`,options.idempotencyKey);if(existing)return existing}
+  const jid=id(),now=nowIso();run(`INSERT INTO jobs(id,type,target_type,target_id,idempotency_key,priority,status,run_after,attempt_count,max_attempts,payload_json,requested_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,jid,type,options.targetType||null,options.targetId||null,options.idempotencyKey||null,options.priority??50,'queued',options.runAfter||now,0,options.maxAttempts??3,JSON.stringify(payload),options.requestedBy||null,now,now);emitEvent('job.queued',{id:jid,type});return one('SELECT * FROM jobs WHERE id=?',jid)
+}
+export function listJobs(limit=100){return all('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?',Math.max(1,Math.min(500,limit))).map(formatJob)}
+export function getJob(idValue:string){const row=one('SELECT * FROM jobs WHERE id=?',idValue);if(!row)return null;return{...formatJob(row),events:all('SELECT * FROM job_events WHERE job_id=? ORDER BY sequence_no',idValue).map((e)=>({...e,payload:json(e.payload_json,{})}))}}
+function formatJob(row:any){return{...row,payload:json(row.payload_json,{}),result:json(row.result_json,null)}}
+function appendEvent(jobId:string,type:string,message:string,payload:unknown={},level='info'){const seq=Number(one('SELECT COALESCE(MAX(sequence_no),0)+1 AS n FROM job_events WHERE job_id=?',jobId)?.n||1);const event={id:id(),jobId,sequenceNo:seq,eventType:type,level,message,payload,createdAt:nowIso()};run('INSERT INTO job_events(id,job_id,sequence_no,event_type,level,message,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?)',event.id,jobId,seq,type,level,message,JSON.stringify(payload??{}),event.createdAt);emitEvent('job.event',event)}
+export function cancelJob(idValue:string){const row=one('SELECT * FROM jobs WHERE id=?',idValue);if(!row)throw Object.assign(new Error('任务不存在'),{code:'JOB_NOT_FOUND',status:404});if(!['queued','retry_wait'].includes(row.status))throw Object.assign(new Error('当前任务状态不能取消'),{code:'JOB_CANNOT_CANCEL',status:409});run('UPDATE jobs SET status=\'canceled\',completed_at=?,updated_at=? WHERE id=?',nowIso(),nowIso(),idValue);appendEvent(idValue,'job.canceled','任务已取消');return getJob(idValue)}
+export function retryJob(idValue:string){const row=one('SELECT * FROM jobs WHERE id=?',idValue);if(!row)throw Object.assign(new Error('任务不存在'),{code:'JOB_NOT_FOUND',status:404});run('UPDATE jobs SET status=\'queued\',run_after=?,locked_at=NULL,locked_by=NULL,error_code=NULL,error_message=NULL,completed_at=NULL,updated_at=? WHERE id=?',nowIso(),nowIso(),idValue);appendEvent(idValue,'job.requeued','任务已重新入队');return getJob(idValue)}
+async function processOne(workerId:string){const candidate=one(`SELECT * FROM jobs WHERE status IN ('queued','retry_wait') AND run_after<=? ORDER BY priority DESC,created_at LIMIT 1`,nowIso());if(!candidate)return false;const changed=run(`UPDATE jobs SET status='running',locked_at=?,locked_by=?,attempt_count=attempt_count+1,started_at=COALESCE(started_at,?),updated_at=? WHERE id=? AND status IN ('queued','retry_wait')`,nowIso(),workerId,nowIso(),nowIso(),candidate.id);if(!changed.changes)return false;const job=one('SELECT * FROM jobs WHERE id=?',candidate.id),handler=handlers.get(job.type);appendEvent(job.id,'job.started',`开始执行 ${job.type}`,{attempt:job.attempt_count});try{if(!handler)throw Object.assign(new Error(`未注册任务处理器：${job.type}`),{code:'JOB_HANDLER_MISSING'});const result=await handler({job,payload:json(job.payload_json,{}),event:(type,message,payload={},level='info')=>appendEvent(job.id,type,message,payload,level)});run(`UPDATE jobs SET status='succeeded',result_json=?,completed_at=?,locked_at=NULL,locked_by=NULL,updated_at=? WHERE id=?`,JSON.stringify(result??null),nowIso(),nowIso(),job.id);appendEvent(job.id,'job.succeeded','任务执行成功',result||{});audit(job.requested_by,'job.execute','job',job.id,'success',{type:job.type});emitEvent('job.updated',getJob(job.id));return true}catch(error){const info=safeError(error),attempt=Number(job.attempt_count||1),max=Number(job.max_attempts||3),canRetry=attempt<max;const next=new Date(Date.now()+Math.min(300000,Math.pow(2,attempt)*5000)).toISOString();run(`UPDATE jobs SET status=?,run_after=?,error_code=?,error_message=?,completed_at=?,locked_at=NULL,locked_by=NULL,updated_at=? WHERE id=?`,canRetry?'retry_wait':'failed',next,info.code,info.message,canRetry?null:nowIso(),nowIso(),job.id);appendEvent(job.id,canRetry?'job.retry_wait':'job.failed',info.message,{code:info.code,nextRunAt:canRetry?next:null,details:info.details},'error');audit(job.requested_by,'job.execute','job',job.id,'failed',{type:job.type,error:info});emitEvent('job.updated',getJob(job.id));return true}}
+export function registerCoreHandlers(){
+  registerJobHandler('nodes.sync',async({event})=>{event('nodes.sync','同步节点目录');const result=await syncNodes();event('nodes.test','测试节点连通性');return{...result,tests:await testAllNodes(50)}})
+  registerJobHandler('tunnels.sync',async()=>syncObservedTunnels())
+  registerJobHandler('dns.sync',async()=>syncObservedDns())
+  registerJobHandler('tunnels.reconcile',async({payload,event})=>{await syncObservedTunnels();const plan=buildTunnelPlan(payload.targetNode||undefined,{cleanupOrphans:!!payload.cleanupOrphans});event('tunnels.plan','隧道差异计划已生成',plan);return payload.dryRun!==false?{dryRun:true,plan}:applyTunnelPlan(plan,event)})
+  registerJobHandler('dns.reconcile',async({payload,event})=>{if(payload.targetNode)deriveDns(String(payload.targetNode));await syncObservedDns();const plan=buildDnsPlan({cleanupOrphans:!!payload.cleanupOrphans});event('dns.plan','DNS差异计划已生成',plan);return payload.dryRun!==false?{dryRun:true,plan}:applyDnsPlan(plan,event)})
+  registerJobHandler('health.check',async()=>healthCheck())
+  registerJobHandler('switch.plan',async({payload})=>buildSwitchPlan(payload.targetNode||undefined,payload.reason||'manual'))
+  registerJobHandler('switch.execute',async({payload,event})=>executeSwitch(String(payload.planId),event))
+  registerJobHandler('auto.failover',async({event})=>{const plan=await buildSwitchPlan(undefined,'automatic_health_failure');event('auto.plan','自动切换计划已生成',plan);if(plan.risk==='high'&&Boolean(getSetting('automation.require_approval_for_high_risk',true)))return{approvalRequired:true,plan};return executeSwitch(plan.id,event)})
+  registerJobHandler('runtime.action',async({payload})=>runtimeAction(payload.action))
+  registerJobHandler('auth.ensure',async()=>ensureAuth())
+  registerJobHandler('auth.refresh',async()=>refreshToken())
+}
+export function startJobRunner(){if(runnerStarted)return;runnerStarted=true;registerCoreHandlers();const workerId=`worker-${process.pid}`;run(`UPDATE jobs SET status='retry_wait',run_after=?,locked_at=NULL,locked_by=NULL,updated_at=? WHERE status='running'`,nowIso(),nowIso());(async()=>{while(runnerStarted){try{const worked=await processOne(workerId);if(!worked)await sleep(750)}catch(e){console.error('job runner error',e);await sleep(2000)}}})()}
+export function stopJobRunner(){runnerStarted=false}
+
+let schedulerStarted=false
+export function startScheduler(){if(schedulerStarted)return;schedulerStarted=true;(async()=>{while(schedulerStarted){try{const enabled=Boolean(getSetting('automation.enabled',false)),interval=Math.max(30,Number(getSetting('automation.health_interval_seconds',60))),state=one('SELECT value_json FROM scheduler_state WHERE key=\'last_health\''),last=state?Number(json(state.value_json,{at:0}).at||0):0;if(Date.now()-last>=interval*1000){enqueueJob('health.check',{}, {idempotencyKey:`scheduled-health-${Math.floor(Date.now()/(interval*1000))}`,priority:20,maxAttempts:1});run(`INSERT INTO scheduler_state(key,value_json,updated_at) VALUES('last_health',?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`,JSON.stringify({at:Date.now()}),nowIso())}
+      if(enabled){const latest=one('SELECT overall_status,created_at FROM health_snapshots ORDER BY created_at DESC LIMIT 1');const failures=Number(one(`SELECT COUNT(*) AS n FROM (SELECT overall_status FROM health_snapshots ORDER BY created_at DESC LIMIT ?) WHERE overall_status='offline'`,Number(getSetting('automation.failure_threshold',3)))?.n||0);const threshold=Number(getSetting('automation.failure_threshold',3)),cooldown=Number(getSetting('automation.cooldown_minutes',30)),lastSwitch=one(`SELECT completed_at FROM switch_plans WHERE status='succeeded' ORDER BY completed_at DESC LIMIT 1`);const cooling=lastSwitch?.completed_at&&Date.now()-new Date(lastSwitch.completed_at).getTime()<cooldown*60000;if(latest&&failures>=threshold&&!cooling){const active=one(`SELECT id FROM jobs WHERE type IN ('auto.failover','switch.execute') AND status IN ('queued','running','retry_wait') LIMIT 1`);if(!active){const failoverJob=enqueueJob('auto.failover',{}, {priority:100,maxAttempts:1,idempotencyKey:`auto-failover-${Math.floor(Date.now()/60000)}`});setSetting('automation.last_plan_job',failoverJob.id)}}}
+    }catch(e){console.error('scheduler error',e)}await sleep(5000)}})()}
+export function stopScheduler(){schedulerStarted=false}

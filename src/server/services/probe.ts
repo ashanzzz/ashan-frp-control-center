@@ -1,0 +1,6 @@
+import net from 'node:net'
+import { performance } from 'node:perf_hooks'
+import { request } from '../provider-http.ts'
+
+export async function tcpProbe(host:string,port:number,timeoutMs=3000):Promise<{ok:boolean;latencyMs:number;error?:string}>{if(!host||!port)return{ok:false,latencyMs:0,error:'缺少主机或端口'};const started=performance.now();return new Promise((resolve)=>{const socket=net.createConnection({host,port});let done=false;const finish=(ok:boolean,error?:string)=>{if(done)return;done=true;socket.destroy();resolve({ok,latencyMs:Math.round((performance.now()-started)*10)/10,error})};socket.setTimeout(timeoutMs);socket.once('connect',()=>finish(true));socket.once('timeout',()=>finish(false,'timeout'));socket.once('error',(e)=>finish(false,e.message))})}
+export async function httpProbe(url:string,timeoutMs=8000):Promise<{ok:boolean;latencyMs:number;status?:number;error?:string}>{const started=performance.now();try{const result=await request(url,{method:'GET',timeoutMs,headers:{'user-agent':'Ashan-FRP-Health/1.0'}});return{ok:result.status>=200&&result.status<500,latencyMs:Math.round((performance.now()-started)*10)/10,status:result.status}}catch(e){return{ok:false,latencyMs:Math.round((performance.now()-started)*10)/10,error:e instanceof Error?e.message:String(e)}}}

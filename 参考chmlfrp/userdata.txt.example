@@ -1,0 +1,19 @@
+{
+  "cloudflare": {
+    "email": "YOUR_CF_EMAIL",
+    "api_token": "YOUR_CF_API_TOKEN",
+    "zone_id": "YOUR_CF_ZONE_ID"
+  },
+  "chmlfrp": {
+    "username": "YOUR_USERNAME",
+    "password": "YOUR_PASSWORD",
+    "oauth2": {
+      "enabled": true,
+      "client_id": "YOUR_CLIENT_ID",
+      "client_secret": "YOUR_CLIENT_SECRET",
+      "access_token": "",
+      "refresh_token": "",
+      "token_expires_at": 0
+    }
+  }
+}
