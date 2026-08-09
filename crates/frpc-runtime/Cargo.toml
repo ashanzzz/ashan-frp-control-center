@@ -1,0 +1,13 @@
+[package]
+name = "ashan-frp-frpc-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ashan-frp-domain = { path = "../domain" }
+ashan-frp-frpc-log = { path = "../frpc-log" }
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true

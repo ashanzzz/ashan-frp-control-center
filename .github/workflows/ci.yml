@@ -1,0 +1,19 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --exclude ashan-frp-web
+      - run: cargo check --workspace --exclude ashan-frp-web
+      - run: cargo install dioxus-cli --version '^0.7' --locked
+      - run: dx build --release --platform web
+      - run: cargo build --release -p ashan-frp-server

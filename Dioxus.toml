@@ -1,0 +1,12 @@
+[application]
+name = "ashan-frp-control-center"
+sub_package = "ashan-frp-web"
+out_dir = "dist"
+asset_dir = "apps/web/public"
+
+[web.app]
+title = "Ashan FRP Control Center"
+
+[web.watcher]
+watch_path = ["apps/web/src", "apps/web/assets", "crates/domain/src"]
+reload_html = true

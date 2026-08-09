@@ -1,0 +1,8 @@
+[package]
+name = "ashan-frp-failover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ashan-frp-domain = { path = "../domain" }

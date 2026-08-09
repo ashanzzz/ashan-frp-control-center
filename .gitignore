@@ -1,0 +1,14 @@
+/target/
+**/dist/
+/data/
+.env
+*.db
+*.db-shm
+*.db-wal
+*.log
+.DS_Store
+.idea/
+.vscode/
+.codex-runtime/
+__pycache__/
+*.pyc

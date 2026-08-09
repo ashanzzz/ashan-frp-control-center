@@ -1,0 +1,34 @@
+services:
+  ashan-frp-control-center:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/ashanzzz/ashan-frp-control-center:latest
+    container_name: ashan-frp-control-center
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      HTTP_ADDR: "0.0.0.0:8080"
+      DATA_DIR: /data
+      DATABASE_URL: "sqlite:///data/control-center.db"
+      WEB_DIR: /app/web
+      RUST_LOG: "ashan_frp_server=info,info"
+      CHMLFRP_BASE_URL: "${CHMLFRP_BASE_URL:-https://cf-v2.uapis.cn}"
+      CHMLFRP_TOKEN: "${CHMLFRP_TOKEN:-}"
+      CLOUDFLARE_API_TOKEN: "${CLOUDFLARE_API_TOKEN:-}"
+      CLOUDFLARE_ZONE_ID: "${CLOUDFLARE_ZONE_ID:-}"
+      FRPC_BINARY: /data/frpc/frpc
+      FRPC_CONFIG: /data/frpc/frpc.ini
+      ACTIVE_NODE: "${ACTIVE_NODE:-}"
+      STANDBY_NODE: "${STANDBY_NODE:-}"
+      QUARANTINE_DAYS: "${QUARANTINE_DAYS:-30}"
+      FAILOVER_ENABLED: "${FAILOVER_ENABLED:-true}"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

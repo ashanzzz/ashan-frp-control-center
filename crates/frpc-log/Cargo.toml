@@ -1,0 +1,9 @@
+[package]
+name = "ashan-frp-frpc-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ashan-frp-domain = { path = "../domain" }
+chrono.workspace = true

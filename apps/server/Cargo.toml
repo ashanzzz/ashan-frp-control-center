@@ -1,0 +1,28 @@
+[package]
+name = "ashan-frp-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ashan-frp-chmlfrp = { path = "../../crates/chmlfrp" }
+ashan-frp-cloudflare = { path = "../../crates/cloudflare" }
+ashan-frp-database = { path = "../../crates/database" }
+ashan-frp-domain = { path = "../../crates/domain" }
+ashan-frp-failover = { path = "../../crates/failover" }
+ashan-frp-frpc-runtime = { path = "../../crates/frpc-runtime" }
+ashan-frp-frpc-log = { path = "../../crates/frpc-log" }
+axum.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+sha2 = "0.10"
+hex = "0.4"

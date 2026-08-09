@@ -1,0 +1,14 @@
+[package]
+name = "ashan-frp-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ashan-frp-domain = { path = "../../crates/domain" }
+dioxus = { version = "0.7", features = ["web", "router"] }
+gloo-net = "0.6"
+gloo-timers = { version = "0.3", features = ["futures"] }
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen-futures = "0.4"
