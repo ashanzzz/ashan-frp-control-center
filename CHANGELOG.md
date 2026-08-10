@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.6 - 2026-08-09
+
+- Fix GitHub Actions exit 126 by eliminating executable-bit dependence for repository shell scripts.
+- CI now invokes build and staging scripts explicitly with `bash scripts/...`.
+- Helper scripts use the same rule, so ZIP extraction or cross-platform Git mode changes cannot break the build chain.
+- Shell scripts are intentionally stored non-executable in Git; `scripts/verify.py` rejects direct `./scripts/...` execution.
+
 ## v0.1.5 - 2026-08-09
 
 - Fix Dioxus workspace build ambiguity by making `--package ashan-frp-web` mandatory through `scripts/build-web.sh`.
@@ -22,8 +29,6 @@
 - Fix reqwest 0.13 `query` feature required by ChmlFrp and Cloudflare adapters.
 - Upgrade `actions/checkout` to v6 (Node 24 runtime).
 - Re-run CI-focused source review.
-
-# Changelog
 
 ## 0.1.2 - 2026-08-09
 

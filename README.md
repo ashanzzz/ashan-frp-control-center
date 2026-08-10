@@ -208,7 +208,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 
-./scripts/build-web.sh
+bash scripts/build-web.sh
 cargo build --release -p ashan-frp-server
 ```
 
@@ -217,13 +217,13 @@ cargo build --release -p ashan-frp-server
 
 ## 当前安全边界
 
-`v0.1.5` 延续全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
+`v0.1.6` 延续全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
 
 ## GitHub Actions
 
 仓库只保留一个自动工作流：`.github/workflows/ci.yml`。这是唯一 CI/CD 入口。
 
-本地如果需要构建容器，先运行 `./scripts/build-release.sh` 生成 `.release/`，然后执行 `docker compose build`。Dockerfile 是纯运行时镜像，不会再次编译 Rust/Dioxus。
+本地如果需要构建容器，先运行 `bash scripts/build-release.sh` 生成 `.release/`，然后执行 `docker compose build`。Dockerfile 是纯运行时镜像，不会再次编译 Rust/Dioxus。
 
 - Push 到 `main`：静态不变量检查 → Rust test/check/clippy → `scripts/build-web.sh` 明确构建 `ashan-frp-web` → Server release 构建 → `.release/` 暂存 → Docker 仅打包已验证产物 → 发布 GHCR `latest` 与 `sha-*`。
 - Pull Request 到 `main`：执行同样的质量与构建检查，但不发布 GHCR。

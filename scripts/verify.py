@@ -73,8 +73,10 @@ else:
     push_block = workflow_text.split('  pull_request:', 1)[0]
     if '\n    tags:' in push_block or '\n      tags:' in push_block:
         errors.append('tag-triggered CI is forbidden because it duplicates the main-branch build')
-    if './scripts/build-web.sh' not in workflow_text:
-        errors.append('CI must use scripts/build-web.sh as the only web build entry point')
+    if 'run: bash scripts/build-web.sh' not in workflow_text:
+        errors.append('CI must invoke the web build explicitly with bash scripts/build-web.sh')
+    if 'run: bash scripts/stage-release.sh' not in workflow_text:
+        errors.append('CI must invoke release staging explicitly with bash scripts/stage-release.sh')
     if 'docker/build-push-action@v6' not in workflow_text:
         errors.append('CI must package/publish the runtime image with build-push-action@v6')
 
@@ -106,6 +108,18 @@ for token in ('TODO', 'FIXME', 'unimplemented!()', 'todo!()'):
 
 # Build-path invariants: Dioxus must always target the web binary explicitly,
 # and the Dockerfile must only package already-verified artifacts.
+# Shell scripts are intentionally treated as data files: CI and helper scripts must
+# invoke them through bash and never depend on Git executable-bit preservation.
+for shell_path in ROOT.glob('scripts/*.sh'):
+    mode = shell_path.stat().st_mode
+    # Filesystem mode is not authoritative across ZIP/OS boundaries, so source calls
+    # are checked below instead of requiring +x.
+
+for caller in (ROOT / '.github/workflows/ci.yml', ROOT / 'scripts/verify.sh', ROOT / 'scripts/build-release.sh'):
+    text = caller.read_text(encoding='utf-8')
+    if './scripts/' in text:
+        errors.append(f'direct shell-script execution is forbidden; use bash scripts/... in {caller.relative_to(ROOT)}')
+
 build_web = (ROOT / 'scripts' / 'build-web.sh').read_text(encoding='utf-8')
 if '--package ashan-frp-web' not in build_web:
     errors.append('Dioxus web build must explicitly select --package ashan-frp-web')
