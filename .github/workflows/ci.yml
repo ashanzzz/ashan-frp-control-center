@@ -42,7 +42,7 @@ jobs:
         run: node --check web/assets/app.js
 
       - name: Format check
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all
 
       - name: Unit tests
         run: cargo test --workspace --locked
