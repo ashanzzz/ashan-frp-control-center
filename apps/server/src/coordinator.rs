@@ -227,19 +227,13 @@ impl Coordinator {
                 .await?;
         }
 
-        let require_web = self
-            .state
-            .db
-            .list_tunnels()
-            .await?
-            .into_iter()
-            .any(|plan| {
-                plan.enabled
-                    && matches!(
-                        plan.protocol.to_ascii_lowercase().as_str(),
-                        "http" | "https"
-                    )
-            });
+        let require_web = self.state.db.list_tunnels().await?.into_iter().any(|plan| {
+            plan.enabled
+                && matches!(
+                    plan.protocol.to_ascii_lowercase().as_str(),
+                    "http" | "https"
+                )
+        });
 
         let mut nodes = match self.state.chml.list_nodes().await {
             Ok(nodes) => nodes,
@@ -253,12 +247,8 @@ impl Coordinator {
         for node in &mut nodes {
             node.quarantined_until = self.state.db.quarantine_until(&node.name).await?;
         }
-        let candidates = ordered_candidates(
-            &old,
-            routing.standby_node.as_deref(),
-            &nodes,
-            require_web,
-        );
+        let candidates =
+            ordered_candidates(&old, routing.standby_node.as_deref(), &nodes, require_web);
         if candidates.is_empty() {
             if trigger.is_none() {
                 self.state.db.set_routing_phase(RoutingPhase::Idle).await?;
@@ -350,7 +340,10 @@ impl Coordinator {
                         // candidate so a later precommit error can never restore the
                         // just-quarantined candidate configuration.
                         self.recover_manual_original(job, &old).await?;
-                        self.state.db.set_routing_phase(RoutingPhase::Failover).await?;
+                        self.state
+                            .db
+                            .set_routing_phase(RoutingPhase::Failover)
+                            .await?;
                     }
                     continue;
                 }
@@ -475,9 +468,9 @@ impl Coordinator {
         }
         let dns_required = plans.iter().any(|plan| plan.dns_managed);
         if dns_required && !self.state.cf.configured() {
-            return Err(anyhow!(
-                "failover preflight failed: managed DNS exists but Cloudflare is not configured"
-            ).into());
+            return Err(
+                anyhow!("failover preflight failed: managed DNS exists but Cloudflare is not configured").into(),
+            );
         }
         if dns_required {
             let records = self
@@ -499,13 +492,14 @@ impl Coordinator {
             .context("failover preflight: read target ChmlFrp node")?;
         if !target_info.state.eq_ignore_ascii_case("online") {
             return Err(MigrationError::TargetNode(format!(
-                "target node reports state {}", target_info.state
+                "target node reports state {}",
+                target_info.state
             )));
         }
         if dns_required && target_info.real_ip.trim().is_empty() {
-            return Err(anyhow!(
-                "failover preflight failed: target ChmlFrp node has no realIp"
-            ).into());
+            return Err(
+                anyhow!("failover preflight failed: target ChmlFrp node has no realIp").into(),
+            );
         }
 
         let remote = self.state.chml.list_tunnels().await?;
