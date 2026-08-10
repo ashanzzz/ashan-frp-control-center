@@ -217,7 +217,7 @@ cargo build --release -p ashan-frp-server
 
 ## 当前安全边界
 
-`v0.1.6` 延续全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
+`v0.1.7` 延续全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
 
 ## GitHub Actions
 

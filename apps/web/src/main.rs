@@ -24,8 +24,8 @@ enum Tab {
 #[component]
 fn App() -> Element {
     let mut tab = use_signal(|| Tab::Control);
-    let mut dashboard = use_signal(|| None::<DashboardSnapshot>);
-    let mut error = use_signal(|| None::<String>);
+    let dashboard = use_signal(|| None::<DashboardSnapshot>);
+    let error = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
 
     let mut dashboard_task = dashboard;
@@ -186,13 +186,13 @@ fn Header(
             }
             Metric {
                 title: "FRPC",
-                value: if snapshot.frpc.running { "Running" } else { "Stopped" }.into(),
-                sub: if snapshot.frpc.connected { "Connected" } else { "Waiting" }.into(),
+                value: (if snapshot.frpc.running { "Running" } else { "Stopped" }).into(),
+                sub: (if snapshot.frpc.connected { "Connected" } else { "Waiting" }).into(),
                 kind: if snapshot.frpc.running { "good" } else { "bad" },
             }
             Metric {
                 title: "自动故障切换",
-                value: if snapshot.routing.failover_enabled { "已开启" } else { "已关闭" }.into(),
+                value: (if snapshot.routing.failover_enabled { "已开启" } else { "已关闭" }).into(),
                 sub: format!("隔离期 {} 天", snapshot.routing.quarantine_days),
                 kind: if snapshot.routing.failover_enabled { "good" } else { "neutral" },
             }
@@ -293,7 +293,7 @@ fn NewTunnelDialog(on_close: EventHandler<()>) -> Element {
     let mut port = use_signal(String::new);
     let mut protocol = use_signal(|| "http".to_string());
     let mut domain = use_signal(String::new);
-    let mut error = use_signal(|| None::<String>);
+    let error = use_signal(|| None::<String>);
     let close_cancel = on_close.clone();
     let close_save = on_close.clone();
 
@@ -452,13 +452,13 @@ fn FrpcPage(snapshot: DashboardSnapshot) -> Element {
             div { class: "global-grid",
                 Metric {
                     title: "进程",
-                    value: if snapshot.frpc.running { "Running" } else { "Stopped" }.into(),
+                    value: (if snapshot.frpc.running { "Running" } else { "Stopped" }).into(),
                     sub: format!("PID {:?}", snapshot.frpc.pid),
                     kind: if snapshot.frpc.running { "good" } else { "bad" },
                 }
                 Metric {
                     title: "服务端连接",
-                    value: if snapshot.frpc.connected { "Connected" } else { "Disconnected" }.into(),
+                    value: (if snapshot.frpc.connected { "Connected" } else { "Disconnected" }).into(),
                     sub: snapshot.frpc.last_error.clone().unwrap_or_default(),
                     kind: if snapshot.frpc.connected { "good" } else { "bad" },
                 }

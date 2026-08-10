@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.7 - 2026-08-09
+
+- Fix Dioxus/Rust parsing for conditional `String` component props by parenthesizing the full `if` expression before `.into()`.
+- Fix all five matching conditional prop expressions in the Web UI, not only the first compiler-reported line.
+- Remove two unnecessary mutable Signal bindings reported by the Web compiler.
+- Add a static regression check that rejects the unparenthesized `if ... else ... .into()` pattern in `apps/web/src/main.rs`.
+- Add an early `cargo check -p ashan-frp-web --target wasm32-unknown-unknown` CI gate before the expensive Dioxus CLI install/build stage.
+
 ## v0.1.6 - 2026-08-09
 
 - Fix GitHub Actions exit 126 by eliminating executable-bit dependence for repository shell scripts.

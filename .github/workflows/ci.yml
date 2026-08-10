@@ -45,6 +45,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --exclude ashan-frp-web --all-targets
 
+      - name: Web Rust check
+        run: cargo check -p ashan-frp-web --target wasm32-unknown-unknown
+
       - name: Install Dioxus CLI
         run: cargo install dioxus-cli --version '=0.7.9' --locked
 

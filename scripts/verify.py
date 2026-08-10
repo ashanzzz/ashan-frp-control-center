@@ -75,6 +75,8 @@ else:
         errors.append('tag-triggered CI is forbidden because it duplicates the main-branch build')
     if 'run: bash scripts/build-web.sh' not in workflow_text:
         errors.append('CI must invoke the web build explicitly with bash scripts/build-web.sh')
+    if 'cargo check -p ashan-frp-web --target wasm32-unknown-unknown' not in workflow_text:
+        errors.append('CI must type-check the Web/WASM crate before installing/running Dioxus CLI')
     if 'run: bash scripts/stage-release.sh' not in workflow_text:
         errors.append('CI must invoke release staging explicitly with bash scripts/stage-release.sh')
     if 'docker/build-push-action@v6' not in workflow_text:
@@ -127,6 +129,13 @@ if 'dx build' in (ROOT / 'Dockerfile').read_text(encoding='utf-8') or 'cargo bui
     errors.append('Dockerfile must be runtime-only and must not rebuild Rust/Dioxus')
 if 'COPY .release/ashan-frp-server' not in (ROOT / 'Dockerfile').read_text(encoding='utf-8'):
     errors.append('Dockerfile must consume the staged verified server artifact')
+
+web_main = (ROOT / 'apps/web/src/main.rs').read_text(encoding='utf-8')
+# Rust parses `.into()` as part of the `else` branch unless the whole conditional
+# expression is parenthesized when used as a component String prop.
+import re
+if re.search(r'\b(?:value|sub):\s*if\b[^\n]*\}\s*else\s*\{[^\n]*\}\.into\(\)', web_main):
+    errors.append('unparenthesized conditional .into() remains in Dioxus component props')
 
 if errors:
     print('STATIC VERIFY FAILED')
