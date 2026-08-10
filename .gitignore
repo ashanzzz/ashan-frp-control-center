@@ -1,5 +1,5 @@
 /target/
-/.release/
+**/dist/
 /data/
 .env
 *.db
@@ -13,4 +13,4 @@
 __pycache__/
 *.pyc
 *.zip
-ashan-frp-control-center-rust-*
+ashan-frp-control-center-*
