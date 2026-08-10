@@ -8,7 +8,9 @@ pub fn ordered_candidates(
 ) -> Vec<NodeSummary> {
     let mut out = Vec::new();
     if let Some(name) = preferred_standby
-        && let Some(node) = nodes.iter().find(|node| node.name == name && eligible(node, active, require_web))
+        && let Some(node) = nodes
+            .iter()
+            .find(|node| node.name == name && eligible(node, active, require_web))
     {
         out.push(node.clone());
     }

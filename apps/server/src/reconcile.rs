@@ -258,11 +258,7 @@ fn overall_status(
     if dns_managed {
         match cloudflare.state {
             LayerState::Failed => {
-                return layer_status(
-                    LayerState::Failed,
-                    "DNS 异常",
-                    cloudflare.detail.clone(),
-                );
+                return layer_status(LayerState::Failed, "DNS 异常", cloudflare.detail.clone());
             }
             LayerState::Missing | LayerState::Drift => {
                 return layer_status(LayerState::Drift, "DNS 待同步", None);
@@ -428,11 +424,7 @@ pub async fn reconcile_all(state: &Arc<AppState>, job_id: &str) -> Result<()> {
             .context("restart frpc with ChmlFrp generated config")?;
     }
 
-    match state
-        .frpc
-        .wait_ready(&names, Duration::from_secs(20))
-        .await
-    {
+    match state.frpc.wait_ready(&names, Duration::from_secs(20)).await {
         Ok(()) => {}
         Err(ReadinessError::Node(error)) => {
             return Err(anyhow!("active node FRPC runtime failure: {error}"));

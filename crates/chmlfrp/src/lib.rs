@@ -84,9 +84,7 @@ impl ChmlFrpClient {
                 real_ip: detail.as_ref().map(|value| value.real_ip.clone()),
                 host: detail.as_ref().map(|value| value.ip.clone()),
                 load1: detail.as_ref().map(|value| value.load1),
-                bandwidth_usage_percent: detail
-                    .as_ref()
-                    .map(|value| value.bandwidth_usage_percent),
+                bandwidth_usage_percent: detail.as_ref().map(|value| value.bandwidth_usage_percent),
                 quarantined_until: None,
             });
         }
@@ -366,16 +364,11 @@ impl RemoteTunnel {
             && self.local_ip == plan.local_ip
             && self.local_port == plan.local_port
             && self.port_type.eq_ignore_ascii_case(&plan.protocol)
-            && (!is_web
-                || self
-                    .effective_domain()
-                    .eq_ignore_ascii_case(&plan.domain))
+            && (!is_web || self.effective_domain().eq_ignore_ascii_case(&plan.domain))
     }
 }
 
-fn deserialize_string_or_number<'de, D>(
-    deserializer: D,
-) -> std::result::Result<String, D::Error>
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
