@@ -208,22 +208,24 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 
-dx build --release --platform web
+./scripts/build-web.sh
 cargo build --release -p ashan-frp-server
 ```
 
-本地发布包会执行离线结构、TOML/YAML/SQL、产品不变量与 Git 一致性检查；GitHub Actions 会进一步执行 Rust 单元测试、cargo check/clippy、Dioxus Web/WASM 构建、Server release 构建及 Docker/GHCR 构建。
+本地发布包会执行离线结构、TOML/YAML/SQL、产品不变量与 Git 一致性检查；GitHub Actions 会进一步执行 Rust 单元测试、cargo check/clippy、Dioxus Web/WASM 构建、Server release 构建及 Docker/GHCR 运行时镜像打包。Web 与 Server 只编译一次，Docker 不重复编译。
 
 
 ## 当前安全边界
 
-`v0.1.4` 延续全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
+`v0.1.5` 延续全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
 
 ## GitHub Actions
 
 仓库只保留一个自动工作流：`.github/workflows/ci.yml`。这是唯一 CI/CD 入口。
 
-- Push 到 `main`：静态不变量检查 → Rust test/check/clippy → Dioxus Web/WASM 构建 → Server release 构建 → 上传构建产物 → 发布 GHCR `latest` 与 `sha-*`。
+本地如果需要构建容器，先运行 `./scripts/build-release.sh` 生成 `.release/`，然后执行 `docker compose build`。Dockerfile 是纯运行时镜像，不会再次编译 Rust/Dioxus。
+
+- Push 到 `main`：静态不变量检查 → Rust test/check/clippy → `scripts/build-web.sh` 明确构建 `ashan-frp-web` → Server release 构建 → `.release/` 暂存 → Docker 仅打包已验证产物 → 发布 GHCR `latest` 与 `sha-*`。
 - Pull Request 到 `main`：执行同样的质量与构建检查，但不发布 GHCR。
 - Tag push：不触发额外工作流，避免同一提交因 branch + tag 产生重复构建。
 - `workflow_dispatch`：允许人工验证，但不会发布 GHCR，除非事件本身是 `main` push。

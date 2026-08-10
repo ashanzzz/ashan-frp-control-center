@@ -12,3 +12,5 @@
 .codex-runtime/
 __pycache__/
 *.pyc
+
+/.release/

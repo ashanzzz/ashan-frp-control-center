@@ -73,6 +73,10 @@ else:
     push_block = workflow_text.split('  pull_request:', 1)[0]
     if '\n    tags:' in push_block or '\n      tags:' in push_block:
         errors.append('tag-triggered CI is forbidden because it duplicates the main-branch build')
+    if './scripts/build-web.sh' not in workflow_text:
+        errors.append('CI must use scripts/build-web.sh as the only web build entry point')
+    if 'docker/build-push-action@v6' not in workflow_text:
+        errors.append('CI must package/publish the runtime image with build-push-action@v6')
 
 coordinator = (ROOT / 'apps/server/src/coordinator.rs').read_text(encoding='utf-8')
 if 'queued_global_failover' not in coordinator or 'runtime_generation' not in coordinator:
@@ -98,6 +102,17 @@ for token in ('TODO', 'FIXME', 'unimplemented!()', 'todo!()'):
                 hits.append(str(path.relative_to(ROOT)))
     if hits:
         errors.append(f'{token} found in: {hits}')
+
+
+# Build-path invariants: Dioxus must always target the web binary explicitly,
+# and the Dockerfile must only package already-verified artifacts.
+build_web = (ROOT / 'scripts' / 'build-web.sh').read_text(encoding='utf-8')
+if '--package ashan-frp-web' not in build_web:
+    errors.append('Dioxus web build must explicitly select --package ashan-frp-web')
+if 'dx build' in (ROOT / 'Dockerfile').read_text(encoding='utf-8') or 'cargo build' in (ROOT / 'Dockerfile').read_text(encoding='utf-8'):
+    errors.append('Dockerfile must be runtime-only and must not rebuild Rust/Dioxus')
+if 'COPY .release/ashan-frp-server' not in (ROOT / 'Dockerfile').read_text(encoding='utf-8'):
+    errors.append('Dockerfile must consume the staged verified server artifact')
 
 if errors:
     print('STATIC VERIFY FAILED')

@@ -1,3 +1,13 @@
+# Changelog
+
+## v0.1.5 - 2026-08-09
+
+- Fix Dioxus workspace build ambiguity by making `--package ashan-frp-web` mandatory through `scripts/build-web.sh`.
+- Pin the Dioxus CLI to 0.7.9 and make the web package selection explicit for a deterministic frontend build entry point.
+- Refactor CI/CD so Web and Server are compiled exactly once; Docker is now runtime-only and packages `.release/`.
+- Keep a single GitHub Actions workflow; PR builds validate the runtime image without pushing, while main pushes publish GHCR.
+- Strengthen `scripts/verify.py` so bare `dx build` and build-stage Dockerfiles cannot reappear.
+
 ## v0.1.4
 
 - Fixed Axum 0.8 server compilation by importing the `put` routing function used by the tunnel update route.

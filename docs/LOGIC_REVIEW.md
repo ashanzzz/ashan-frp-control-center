@@ -17,6 +17,7 @@
 11. **容器重启后 FRPC 不自动恢复**：已有二进制与持久化 ChmlFrp 配置时，Control Center 启动后自动拉起 FRPC；失败只报警，不阻塞 Web 控制台。
 12. **Cloudflare 同域名多 A 记录被 HashMap 吞掉**：主控台现在显示 `A 记录冲突`；Reconcile/Failover 在任何 Provider 写操作前检查受管域名 A 记录唯一性。
 13. **CI/CD 重复触发**：旧版多 workflow 会让同一 main push 被重复测试/构建；v0.1.4 收敛为唯一 `.github/workflows/ci.yml`，tag 不再单独触发。
+14. **Dioxus workspace 构建歧义 / Docker 重复编译**：v0.1.5 将 `scripts/build-web.sh` 设为唯一 Web 构建入口，强制 `--package ashan-frp-web`；CI 只编译 Web/Server 一次，Dockerfile 仅打包 `.release/` 已验证产物，不再二次编译。
 
 ## 仍需真实环境验证 / 后续硬化
 

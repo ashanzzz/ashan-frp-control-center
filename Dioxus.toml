@@ -1,6 +1,5 @@
 [application]
 name = "ashan-frp-control-center"
-sub_package = "ashan-frp-web"
 out_dir = "dist"
 asset_dir = "apps/web/public"
 
