@@ -120,7 +120,10 @@ async fn restore_frpc_if_possible(state: &Arc<AppState>, config: &AppConfig) {
 
     if has_binary && has_config {
         match state.frpc.start().await {
-            Ok(()) => info!(generation = state.frpc.generation(), "restored FRPC runtime"),
+            Ok(()) => info!(
+                generation = state.frpc.generation(),
+                "restored FRPC runtime"
+            ),
             Err(error) => error!(error = %error, "FRPC restore failed; WebUI remains available"),
         }
     } else {

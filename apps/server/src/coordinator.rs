@@ -640,7 +640,8 @@ impl Coordinator {
                 match self.state.chml.node_info(target).await {
                     Ok(info) if !info.state.eq_ignore_ascii_case("online") => {
                         return Err(MigrationError::TargetNode(format!(
-                            "readiness timeout and node state={}", info.state
+                            "readiness timeout and node state={}",
+                            info.state
                         )));
                     }
                     _ => {
@@ -780,14 +781,15 @@ impl Coordinator {
         }
         let mut failures = Vec::new();
         for (plan, original) in changed.iter().rev() {
-            if let Err(err) = self
-                .sync_with_retry(original, plan, &original.node)
-                .await
-            {
+            if let Err(err) = self.sync_with_retry(original, plan, &original.node).await {
                 failures.push(format!("{}: {}", plan.name, err));
             }
         }
-        let level = if failures.is_empty() { "warning" } else { "error" };
+        let level = if failures.is_empty() {
+            "warning"
+        } else {
+            "error"
+        };
         let message = if failures.is_empty() {
             "ChmlFrp 预提交阶段失败，已补偿恢复所有已修改隧道"
         } else {
@@ -812,7 +814,13 @@ impl Coordinator {
         let Some(config) = config else {
             return;
         };
-        if self.state.frpc.restore_config(config, revision).await.is_ok() {
+        if self
+            .state
+            .frpc
+            .restore_config(config, revision)
+            .await
+            .is_ok()
+        {
             let _ = self.state.frpc.restart().await;
         }
     }
