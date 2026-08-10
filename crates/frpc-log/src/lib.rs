@@ -187,7 +187,7 @@ pub fn config_has_duplicate_proxy_names(config: &str) -> bool {
             continue;
         }
 
-        if line.starts_with("[[") && line.ends_with("]]")) {
+        if line.starts_with("[[") && line.ends_with("]]") {
             in_toml_proxy = false;
             continue;
         }
