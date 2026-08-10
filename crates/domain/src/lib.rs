@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerState {
     Ok,
@@ -23,10 +24,19 @@ pub struct LayerStatus {
 
 impl LayerStatus {
     pub fn ok(label: impl Into<String>) -> Self {
-        Self { state: LayerState::Ok, label: label.into(), detail: None }
+        Self {
+            state: LayerState::Ok,
+            label: label.into(),
+            detail: None,
+        }
     }
+
     pub fn unknown(label: impl Into<String>) -> Self {
-        Self { state: LayerState::Unknown, label: label.into(), detail: None }
+        Self {
+            state: LayerState::Unknown,
+            label: label.into(),
+            detail: None,
+        }
     }
 }
 
@@ -64,13 +74,56 @@ pub struct TunnelRow {
     pub overall: LayerStatus,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingPhase {
+    Idle,
+    Failover,
+    DnsSwitching,
+    DegradedDns,
+    Failed,
+}
+
+impl RoutingPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Failover => "failover",
+            Self::DnsSwitching => "dns_switching",
+            Self::DegradedDns => "degraded_dns",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for RoutingPhase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RoutingPhase {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "idle" => Ok(Self::Idle),
+            "failover" => Ok(Self::Failover),
+            "dns_switching" => Ok(Self::DnsSwitching),
+            "degraded_dns" => Ok(Self::DegradedDns),
+            "failed" => Ok(Self::Failed),
+            other => Err(format!("unknown routing phase: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RoutingState {
     pub active_node: Option<String>,
     pub standby_node: Option<String>,
     pub quarantine_days: i64,
     pub failover_enabled: bool,
-    pub state: String,
+    pub state: RoutingPhase,
     pub revision: i64,
     pub updated_at: String,
 }
@@ -97,7 +150,7 @@ pub struct NodeSummary {
     pub quarantined_until: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FaultDomain {
     Local,
@@ -108,7 +161,7 @@ pub enum FaultDomain {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FrpcEventType {
     LoginSuccess,
@@ -198,4 +251,23 @@ pub struct ApiResponse<T> {
 pub struct ErrorResponse {
     pub code: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RoutingPhase;
+    use std::str::FromStr;
+
+    #[test]
+    fn routing_phase_round_trip() {
+        for phase in [
+            RoutingPhase::Idle,
+            RoutingPhase::Failover,
+            RoutingPhase::DnsSwitching,
+            RoutingPhase::DegradedDns,
+            RoutingPhase::Failed,
+        ] {
+            assert_eq!(RoutingPhase::from_str(phase.as_str()).unwrap(), phase);
+        }
+    }
 }

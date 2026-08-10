@@ -1,5 +1,6 @@
 [package]
 name = "ashan-frp-chmlfrp"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,4 +11,3 @@ ashan-frp-domain = { path = "../domain" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true

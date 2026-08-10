@@ -1,5 +1,6 @@
 [package]
 name = "ashan-frp-server"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,15 +15,14 @@ ashan-frp-failover = { path = "../../crates/failover" }
 ashan-frp-frpc-runtime = { path = "../../crates/frpc-runtime" }
 ashan-frp-frpc-log = { path = "../../crates/frpc-log" }
 axum.workspace = true
-chrono.workspace = true
 futures-util.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+thiserror.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-sha2 = "0.10"
-hex = "0.4"
+sha2.workspace = true
+hex.workspace = true

@@ -1,6 +1,6 @@
 .git
-.gitignore
+.github
 target
 data
 *.zip
-.codex-runtime
+.env

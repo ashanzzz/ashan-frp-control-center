@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible control-center problem
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste ChmlFrp or Cloudflare tokens. Redact public IPs or domains if needed.
+  - type: input
+    id: version
+    attributes:
+      label: Version / image tag
+      placeholder: "0.2.0 or sha-..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redact tokens and other secrets.
+      render: text
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Affected layer
+      options:
+        - Control Center / API
+        - ChmlFrp
+        - FRPC runtime / logs
+        - Cloudflare DNS
+        - Docker / Unraid
+        - CI / build
+        - Other
+    validations:
+      required: true

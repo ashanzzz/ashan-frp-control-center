@@ -2,14 +2,23 @@ use crate::{reconcile, state::AppState};
 use anyhow::{anyhow, Context, Result};
 use ashan_frp_chmlfrp::RemoteTunnel;
 use ashan_frp_cloudflare::DnsRecord;
-use ashan_frp_domain::{FaultDomain, FrpcEvent, FrpcEventType, TunnelPlan};
+use ashan_frp_domain::{FaultDomain, FrpcEvent, FrpcEventType, RoutingPhase, TunnelPlan};
 use ashan_frp_failover::ordered_candidates;
 use ashan_frp_frpc_runtime::ReadinessError;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
+use thiserror::Error;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+#[derive(Debug, Error)]
+enum MigrationError {
+    #[error("target node runtime failure: {0}")]
+    TargetNode(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 #[derive(Clone)]
 pub struct Coordinator {
@@ -44,10 +53,9 @@ impl Coordinator {
                         tokio::spawn(async move {
                             if let Ok(Some(confirmed)) =
                                 next.confirm_ambiguous_network_fault(event).await
+                                && let Err(err) = next.queued_global_failover(confirmed).await
                             {
-                                if let Err(err) = next.queued_global_failover(confirmed).await {
-                                    error!(error = %err, "confirmed network fault failover failed");
-                                }
+                                error!(error = %err, "confirmed network fault failover failed");
                             }
                         });
                     }
@@ -125,10 +133,10 @@ impl Coordinator {
     }
 
     async fn global_failover_locked(&self, trigger: Option<FrpcEvent>) -> Result<String> {
-        if let Some(event) = trigger.as_ref() {
-            if event.runtime_generation != self.state.frpc.generation() {
-                return Err(anyhow!("stale FRPC failover event ignored"));
-            }
+        if let Some(event) = trigger.as_ref()
+            && event.runtime_generation != self.state.frpc.generation()
+        {
+            return Err(anyhow!("stale FRPC failover event ignored"));
         }
 
         let job = Uuid::new_v4().to_string();
@@ -164,7 +172,7 @@ impl Coordinator {
             .active_node
             .clone()
             .ok_or_else(|| anyhow!("no active node configured"))?;
-        self.state.db.set_routing_state("failover").await?;
+        self.state.db.set_routing_phase(RoutingPhase::Failover).await?;
 
         let reason = trigger
             .as_ref()
@@ -195,6 +203,15 @@ impl Coordinator {
                     serde_json::json!({"reason": reason}),
                 )
                 .await?;
+
+            // The active node is now a confirmed node failure. Do not let frpc
+            // reconnect to that known-bad node while provider/candidate preflight
+            // continues. Candidate configs are started explicitly later.
+            self.state
+                .frpc
+                .stop()
+                .await
+                .context("stop FRPC after confirmed active-node failure")?;
         } else {
             self.state
                 .db
@@ -210,12 +227,42 @@ impl Coordinator {
                 .await?;
         }
 
-        let mut nodes = self.state.chml.list_nodes().await?;
+        let require_web = self
+            .state
+            .db
+            .list_tunnels()
+            .await?
+            .into_iter()
+            .any(|plan| {
+                plan.enabled
+                    && matches!(
+                        plan.protocol.to_ascii_lowercase().as_str(),
+                        "http" | "https"
+                    )
+            });
+
+        let mut nodes = match self.state.chml.list_nodes().await {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                if trigger.is_none() {
+                    self.state.db.set_routing_phase(RoutingPhase::Idle).await?;
+                }
+                return Err(error).context("list ChmlFrp failover candidates");
+            }
+        };
         for node in &mut nodes {
             node.quarantined_until = self.state.db.quarantine_until(&node.name).await?;
         }
-        let candidates = ordered_candidates(&old, routing.standby_node.as_deref(), &nodes);
+        let candidates = ordered_candidates(
+            &old,
+            routing.standby_node.as_deref(),
+            &nodes,
+            require_web,
+        );
         if candidates.is_empty() {
+            if trigger.is_none() {
+                self.state.db.set_routing_phase(RoutingPhase::Idle).await?;
+            }
             return Err(anyhow!("no eligible standby node"));
         }
 
@@ -245,7 +292,13 @@ impl Coordinator {
                 .await?;
 
             match self
-                .migrate_to(job, &target.name, next_standby, trigger_tunnel)
+                .migrate_to(
+                    job,
+                    &target.name,
+                    next_standby,
+                    trigger_tunnel,
+                    trigger.is_none(),
+                )
                 .await
             {
                 Ok(()) => {
@@ -264,7 +317,10 @@ impl Coordinator {
                     info!(job_id = %job, target = %target.name, "global failover complete");
                     return Ok(());
                 }
-                Err(err) if is_target_node_failure(&err) => {
+                Err(MigrationError::TargetNode(message)) => {
+                    // Never keep frpc running against a candidate that has just
+                    // produced a confirmed node-level runtime failure.
+                    let _ = self.state.frpc.stop().await;
                     self.state
                         .db
                         .quarantine_node(
@@ -284,10 +340,18 @@ impl Coordinator {
                             "候选节点出现明确 Node 级运行故障；隔离并继续 Forward Recovery",
                             None,
                             Some(&target.name),
-                            serde_json::json!({"error": err.to_string()}),
+                            serde_json::json!({"error": message.clone()}),
                         )
                         .await?;
-                    last_error = Some(err);
+                    last_error = Some(anyhow!(message));
+                    if trigger.is_none() && idx + 1 < candidates.len() {
+                        // Manual failover starts from a healthy original node.
+                        // Restore that known-good baseline before attempting another
+                        // candidate so a later precommit error can never restore the
+                        // just-quarantined candidate configuration.
+                        self.recover_manual_original(job, &old).await?;
+                        self.state.db.set_routing_phase(RoutingPhase::Failover).await?;
+                    }
                     continue;
                 }
                 Err(err) => {
@@ -303,12 +367,91 @@ impl Coordinator {
                             serde_json::json!({"error": err.to_string()}),
                         )
                         .await?;
-                    return Err(err);
+
+                    let current = self.state.db.routing_state().await?;
+                    let precommit = current.active_node.as_deref() == Some(old.as_str())
+                        && current.state == RoutingPhase::Failover;
+                    if precommit {
+                        if trigger.is_none() {
+                            self.recover_manual_original(job, &old).await?;
+                        } else {
+                            // The original node was already confirmed faulty. A
+                            // provider compensation may put ChmlFrp back into a
+                            // consistent old-node shape, but FRPC must not resume
+                            // traffic on that known-bad node.
+                            let _ = self.state.frpc.stop().await;
+                        }
+                    }
+                    return Err(err.into());
                 }
             }
         }
 
+        if trigger.is_none() {
+            // A manual switch does not mean the original node is faulty. If every
+            // candidate fails, restore the original global desired state instead of
+            // manufacturing an outage.
+            self.recover_manual_original(job, &old).await?;
+        } else {
+            // Every candidate produced a confirmed node-level runtime failure. Do
+            // not keep FRPC running against the final failed candidate, and never
+            // roll back to the original node that was already quarantined.
+            let _ = self.state.frpc.stop().await;
+            let _ = self
+                .state
+                .db
+                .activity(
+                    Some(job),
+                    "failover",
+                    "critical",
+                    "所有候选节点均发生明确 Node 级故障；FRPC 已停止，等待人工恢复",
+                    None,
+                    None,
+                    serde_json::json!({"all_candidates_failed": true}),
+                )
+                .await;
+        }
+
         Err(last_error.unwrap_or_else(|| anyhow!("all failover candidates failed")))
+    }
+
+    async fn recover_manual_original(&self, job: &str, old: &str) -> Result<()> {
+        match reconcile::reconcile_all(&self.state, job).await {
+            Ok(()) => {
+                self.state.db.set_routing_phase(RoutingPhase::Idle).await?;
+                let _ = self
+                    .state
+                    .db
+                    .activity(
+                        Some(job),
+                        "failover_recovery",
+                        "warning",
+                        "手动切换失败；已恢复原活动节点",
+                        None,
+                        Some(old),
+                        serde_json::json!({"manual_failover_recovered": true}),
+                    )
+                    .await;
+                Ok(())
+            }
+            Err(recovery_error) => {
+                let _ = self.state.frpc.stop().await;
+                let _ = self
+                    .state
+                    .db
+                    .activity(
+                        Some(job),
+                        "failover_recovery",
+                        "critical",
+                        "手动切换失败且原活动节点恢复失败；FRPC 已停止",
+                        None,
+                        Some(old),
+                        serde_json::json!({"error": recovery_error.to_string()}),
+                    )
+                    .await;
+                Err(recovery_error)
+            }
+        }
     }
 
     async fn migrate_to(
@@ -317,7 +460,8 @@ impl Coordinator {
         target: &str,
         next_standby: Option<&str>,
         trigger_tunnel: Option<&str>,
-    ) -> Result<()> {
+        restore_previous_runtime: bool,
+    ) -> std::result::Result<(), MigrationError> {
         let plans = self
             .state
             .db
@@ -327,13 +471,13 @@ impl Coordinator {
             .filter(|p| p.enabled)
             .collect::<Vec<_>>();
         if plans.is_empty() {
-            return Err(anyhow!("no enabled managed tunnels"));
+            return Err(anyhow!("no enabled managed tunnels").into());
         }
         let dns_required = plans.iter().any(|plan| plan.dns_managed);
         if dns_required && !self.state.cf.configured() {
             return Err(anyhow!(
                 "failover preflight failed: managed DNS exists but Cloudflare is not configured"
-            ));
+            ).into());
         }
         if dns_required {
             let records = self
@@ -354,15 +498,14 @@ impl Coordinator {
             .await
             .context("failover preflight: read target ChmlFrp node")?;
         if !target_info.state.eq_ignore_ascii_case("online") {
-            return Err(anyhow!(
-                "NODE_TARGET_FAILURE: target node reports state {}",
-                target_info.state
-            ));
+            return Err(MigrationError::TargetNode(format!(
+                "target node reports state {}", target_info.state
+            )));
         }
         if dns_required && target_info.real_ip.trim().is_empty() {
             return Err(anyhow!(
                 "failover preflight failed: target ChmlFrp node has no realIp"
-            ));
+            ).into());
         }
 
         let remote = self.state.chml.list_tunnels().await?;
@@ -382,7 +525,7 @@ impl Coordinator {
             return Err(anyhow!(
                 "failover preflight failed: ChmlFrp tunnels missing [{}]; run global reconcile first",
                 missing.join(",")
-            ));
+            ).into());
         }
 
         self.state
@@ -400,23 +543,33 @@ impl Coordinator {
 
         let snapshots = plans
             .iter()
-            .map(|plan| (plan.clone(), map.get(&plan.name).expect("preflight checked").clone()))
-            .collect::<Vec<_>>();
+            .map(|plan| {
+                map.get(&plan.name)
+                    .cloned()
+                    .map(|remote| (plan.clone(), remote))
+                    .ok_or_else(|| {
+                        MigrationError::Other(anyhow!(
+                            "failover preflight changed unexpectedly: tunnel {} disappeared",
+                            plan.name
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, MigrationError>>()?;
         let mut changed = Vec::<(TunnelPlan, RemoteTunnel)>::new();
 
         for (plan, original) in &snapshots {
             if let Err(err) = self.sync_with_retry(original, plan, target).await {
                 self.rollback_provider(job, &changed).await;
-                return Err(err).with_context(|| {
-                    format!("ChmlFrp partial migration stopped at tunnel {}", plan.name)
-                });
+                return Err(MigrationError::Other(err.context(format!(
+                    "ChmlFrp partial migration stopped at tunnel {}", plan.name
+                ))));
             }
             changed.push((plan.clone(), original.clone()));
         }
 
         if let Err(err) = self.verify_remote_target(&plans, target).await {
             self.rollback_provider(job, &changed).await;
-            return Err(err);
+            return Err(err.into());
         }
 
         let names = plans.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
@@ -424,14 +577,14 @@ impl Coordinator {
             Ok(config) => config,
             Err(err) => {
                 self.rollback_provider(job, &changed).await;
-                return Err(err).context("generate ChmlFrp target config");
+                return Err(MigrationError::Other(err.context("generate ChmlFrp target config")));
             }
         };
         if ashan_frp_frpc_log::config_has_duplicate_proxy_names(&config) {
             self.rollback_provider(job, &changed).await;
             return Err(anyhow!(
                 "ChmlFrp generated config contains duplicate proxy names"
-            ));
+            ).into());
         }
 
         let previous_config = self.state.frpc.read_config().await?;
@@ -445,13 +598,17 @@ impl Coordinator {
 
         if let Err(err) = self.state.frpc.write_config(&config, revision).await {
             self.rollback_provider(job, &changed).await;
-            return Err(err).context("write target FRPC config");
+            return Err(MigrationError::Other(err.context("write target FRPC config")));
         }
         if let Err(err) = self.state.frpc.restart().await {
             self.rollback_provider(job, &changed).await;
-            self.restore_previous_frpc(previous_config.as_deref(), previous_revision)
-                .await;
-            return Err(err).context("restart FRPC with target config");
+            if restore_previous_runtime {
+                self.restore_previous_frpc(previous_config.as_deref(), previous_revision)
+                    .await;
+            } else {
+                let _ = self.state.frpc.stop().await;
+            }
+            return Err(MigrationError::Other(err.context("restart FRPC with target config")));
         }
 
         self.state
@@ -475,36 +632,43 @@ impl Coordinator {
         {
             Ok(()) => {}
             Err(ReadinessError::Node(err)) => {
-                return Err(anyhow!("NODE_TARGET_FAILURE: {err}"));
+                return Err(MigrationError::TargetNode(err));
             }
             Err(ReadinessError::Timeout { connected, missing }) => {
                 // A timeout alone does not prove the standby is bad. Promote to a
                 // node failure only when ChmlFrp independently reports it offline.
                 match self.state.chml.node_info(target).await {
                     Ok(info) if !info.state.eq_ignore_ascii_case("online") => {
-                        return Err(anyhow!(
-                            "NODE_TARGET_FAILURE: readiness timeout and node state={}",
-                            info.state
-                        ));
+                        return Err(MigrationError::TargetNode(format!(
+                            "readiness timeout and node state={}", info.state
+                        )));
                     }
                     _ => {
                         self.rollback_provider(job, &changed).await;
-                        self.restore_previous_frpc(
-                            previous_config.as_deref(),
-                            previous_revision,
-                        )
-                        .await;
+                        if restore_previous_runtime {
+                            self.restore_previous_frpc(
+                                previous_config.as_deref(),
+                                previous_revision,
+                            )
+                            .await;
+                        } else {
+                            let _ = self.state.frpc.stop().await;
+                        }
                         return Err(anyhow!(
                             "FRPC readiness timeout without confirmed node failure; connected={connected}, missing={missing}"
-                        ));
+                        ).into());
                     }
                 }
             }
             Err(ReadinessError::NonNode(err)) => {
                 self.rollback_provider(job, &changed).await;
-                self.restore_previous_frpc(previous_config.as_deref(), previous_revision)
-                    .await;
-                return Err(anyhow!("FRPC non-node startup failure: {err}"));
+                if restore_previous_runtime {
+                    self.restore_previous_frpc(previous_config.as_deref(), previous_revision)
+                        .await;
+                } else {
+                    let _ = self.state.frpc.stop().await;
+                }
+                return Err(anyhow!("FRPC non-node startup failure: {err}").into());
             }
         }
 
@@ -683,8 +847,4 @@ fn ensure_unique_managed_a_records(plans: &[TunnelPlan], records: &[DnsRecord]) 
             conflicts.join(", ")
         ))
     }
-}
-
-fn is_target_node_failure(err: &anyhow::Error) -> bool {
-    err.to_string().starts_with("NODE_TARGET_FAILURE:")
 }

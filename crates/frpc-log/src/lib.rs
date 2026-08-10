@@ -157,10 +157,8 @@ pub fn extract_proxy_name(line: &str) -> Option<String> {
         if c == '[' {
             start = Some(i + 1);
         } else if c == ']' {
-            if let Some(s) = start.take() {
-                if s < i {
-                    groups.push(line[s..i].to_string());
-                }
+            if let Some(s) = start.take() && s < i {
+                groups.push(line[s..i].to_string());
             }
         }
     }
@@ -189,7 +187,7 @@ pub fn config_has_duplicate_proxy_names(config: &str) -> bool {
             continue;
         }
 
-        if line.starts_with("[[") && line.ends_with("]]" ) {
+        if line.starts_with("[[") && line.ends_with("]]")) {
             in_toml_proxy = false;
             continue;
         }
@@ -207,14 +205,13 @@ pub fn config_has_duplicate_proxy_names(config: &str) -> bool {
             continue;
         }
 
-        if in_toml_proxy {
-            if let Some((key, value)) = line.split_once('=') {
-                if key.trim() == "name" {
-                    let name = value.trim().trim_matches(&['"', '\''][..]);
-                    if !name.is_empty() && !seen.insert(name.to_string()) {
-                        return true;
-                    }
-                }
+        if in_toml_proxy
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "name"
+        {
+            let name = value.trim().trim_matches(&['"', '\''][..]);
+            if !name.is_empty() && !seen.insert(name.to_string()) {
+                return true;
             }
         }
     }

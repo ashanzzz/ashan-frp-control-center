@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Ashan FRP Control Center</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><strong>Ashan FRP</strong><span>Control Center</span></div>
+      <nav id="nav">
+        <button data-page="control" class="active">隧道主控台</button>
+        <button data-page="nodes">ChmlFrp</button>
+        <button data-page="dns">DNS</button>
+        <button data-page="frpc">FRPC</button>
+        <button data-page="activity">活动</button>
+        <button data-page="settings">设置</button>
+      </nav>
+      <div id="version" class="version">连接中…</div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div>
+          <h1 id="page-title">隧道主控台</h1>
+          <p id="page-subtitle">所有隧道统一节点，FRPC 日志驱动全局故障切换</p>
+        </div>
+        <div class="actions">
+          <button id="reconcile-btn">全局同步</button>
+          <button id="failover-btn" class="danger">手动全局切换</button>
+        </div>
+      </header>
+      <div id="alert"></div>
+      <section id="global-cards" class="metrics"></section>
+      <section id="content" class="panel loading">正在连接控制中心…</section>
+    </main>
+  </div>
+
+  <dialog id="tunnel-dialog">
+    <form id="tunnel-form" method="dialog">
+      <input type="hidden" id="tunnel-id">
+      <h2 id="tunnel-dialog-title">新增计划隧道</h2>
+      <p class="muted">节点不属于单条隧道。所有计划统一使用当前全局活动节点。</p>
+      <label>隧道名<input id="tunnel-name" required autocomplete="off"></label>
+      <div class="form-grid">
+        <label>本地 IP<input id="tunnel-ip" value="192.168.8.11" required></label>
+        <label>本地端口<input id="tunnel-port" type="number" min="1" max="65535" required></label>
+      </div>
+      <div class="form-grid">
+        <label>协议<select id="tunnel-protocol"><option>http</option><option>https</option><option>tcp</option><option>udp</option></select></label>
+        <label class="check"><input id="tunnel-dns" type="checkbox" checked> 管理 Cloudflare A 记录</label>
+      </div>
+      <label>域名（HTTP/S 或管理 DNS 时必填）<input id="tunnel-domain" autocomplete="off"></label>
+      <div id="dialog-error" class="form-error"></div>
+      <div class="dialog-actions"><button type="button" id="dialog-cancel" class="ghost">取消</button><button type="submit">保存计划</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog">
+      <h2 id="confirm-title">确认操作</h2>
+      <p id="confirm-message"></p>
+      <div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button id="confirm-ok" value="default" class="danger">确认</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

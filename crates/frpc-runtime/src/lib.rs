@@ -119,14 +119,9 @@ impl FrpcManager {
 
     pub async fn recent_logs(&self, limit: usize) -> Vec<FrpcEvent> {
         let logs = self.logs.read().await;
-        logs.iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
+        let mut recent = logs.iter().rev().take(limit).cloned().collect::<Vec<_>>();
+        recent.reverse();
+        recent
     }
 
     pub async fn read_config(&self) -> Result<Option<String>> {
@@ -170,7 +165,7 @@ impl FrpcManager {
 
         let config_text = tokio::fs::read_to_string(&self.config)
             .await
-            .unwrap_or_default();
+            .with_context(|| format!("read FRPC config {}", self.config.display()))?;
         let local_dup = config_has_duplicate_proxy_names(&config_text);
 
         let mut guard = self.child.lock().await;
@@ -232,6 +227,10 @@ impl FrpcManager {
     }
 
     pub async fn stop(&self) -> Result<()> {
+        // Invalidate reader tasks immediately. Buffered stdout/stderr from the
+        // process being stopped must never be classified as current-runtime input.
+        self.generation.fetch_add(1, Ordering::AcqRel);
+
         let mut guard = self.child.lock().await;
         if let Some(mut child) = guard.take() {
             let _ = child.kill().await;
@@ -271,17 +270,16 @@ impl FrpcManager {
             }
 
             let runtime = self.status().await;
-            if let Some(event) = self.last_node_fault.read().await.clone() {
-                if event.runtime_generation == generation {
-                    return Err(ReadinessError::Node(event.raw));
-                }
+            if let Some(event) = self.last_node_fault.read().await.clone()
+                && event.runtime_generation == generation
+            {
+                return Err(ReadinessError::Node(event.raw));
             }
-            if let Some(event) = self.last_startup_fault.read().await.clone() {
-                if event.runtime_generation == generation
-                    && matches!(event.fault_domain, FaultDomain::Auth | FaultDomain::Config)
-                {
-                    return Err(ReadinessError::NonNode(event.raw));
-                }
+            if let Some(event) = self.last_startup_fault.read().await.clone()
+                && event.runtime_generation == generation
+                && matches!(event.fault_domain, FaultDomain::Auth | FaultDomain::Config)
+            {
+                return Err(ReadinessError::NonNode(event.raw));
             }
             if !runtime.running {
                 return Err(ReadinessError::NonNode(
@@ -363,10 +361,10 @@ impl FrpcManager {
             }
         }
 
-        if event.event_type == FrpcEventType::ProxyStarted {
-            if let Some(name) = event.proxy_name.as_ref() {
-                self.started_proxies.write().await.insert(name.clone());
-            }
+        if event.event_type == FrpcEventType::ProxyStarted
+            && let Some(name) = event.proxy_name.as_ref()
+        {
+            self.started_proxies.write().await.insert(name.clone());
         }
 
         if event.triggers_failover && event.fault_domain == FaultDomain::Node {
@@ -452,5 +450,13 @@ mod tests {
         assert!(proxy_name_matches("new-api", "new-api"));
         assert!(proxy_name_matches("token.new-api", "new-api"));
         assert!(!proxy_name_matches("new-api-copy", "new-api"));
+    }
+
+    #[tokio::test]
+    async fn stop_invalidates_the_current_runtime_generation() {
+        let manager = super::FrpcManager::new("/missing/frpc", "/missing/frpc.ini", 100);
+        let before = manager.generation();
+        manager.stop().await.expect("stop without child should succeed");
+        assert!(manager.generation() > before);
     }
 }
