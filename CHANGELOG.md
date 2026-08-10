@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 - 2026-08-10
+
+### CI/CD and Build Cleanups
+- Fix `apps/server/src/state.rs` `parse_env` compilation error by mapping `FromStr::Err` explicitly to `anyhow::Error`.
+- Commit authoritative `Cargo.lock` to Git repository.
+- Consolidate GitHub Actions CI workflow into a single job using `cargo fmt --all -- --check`.
+- Configure Dependabot `multi-ecosystem-groups` to consolidate Cargo, GitHub Actions, and Docker updates into single weekly PRs.
+
 ## 0.2.0 - 2026-08-10
 
 ### Architecture

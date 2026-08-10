@@ -77,7 +77,9 @@ where
     T::Err: std::fmt::Display,
 {
     match env::var(key) {
-        Ok(raw) => raw.parse().with_context(|| format!("parse {key}={raw}")),
+        Ok(raw) => raw
+            .parse()
+            .map_err(|err| anyhow::anyhow!("parse {key}={raw}: {err}")),
         Err(_) => Ok(default),
     }
 }

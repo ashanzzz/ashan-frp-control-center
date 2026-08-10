@@ -1,25 +1,25 @@
 version: 2
+multi-ecosystem-groups:
+  project-dependencies:
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
 updates:
   - package-ecosystem: cargo
     directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
+    patterns:
+      - "*"
+    multi-ecosystem-group: project-dependencies
 
   - package-ecosystem: github-actions
     directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
+    patterns:
+      - "*"
+    multi-ecosystem-group: project-dependencies
 
   - package-ecosystem: docker
     directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
+    patterns:
+      - "*"
+    multi-ecosystem-group: project-dependencies

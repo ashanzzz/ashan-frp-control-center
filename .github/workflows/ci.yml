@@ -15,15 +15,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  quality:
-    name: Quality gate
+  ci:
+    name: Test, build and publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+      packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -40,19 +41,8 @@ jobs:
       - name: Validate WebUI JavaScript
         run: node --check web/assets/app.js
 
-      - name: Resolve locked dependencies
-        run: cargo generate-lockfile
-
-      - name: Upload resolved Cargo.lock
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-lock-${{ github.sha }}
-          path: Cargo.lock
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Format and parse Rust sources
-        run: cargo fmt --all
+      - name: Format check
+        run: cargo fmt --all -- --check
 
       - name: Unit tests
         run: cargo test --workspace --locked
@@ -84,39 +74,12 @@ jobs:
           test -f .release/web/assets/app.js
           git diff --check
 
-      - name: Upload verified runtime bundle
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: runtime-${{ github.sha }}
-          path: .release/
-          if-no-files-found: error
-          retention-days: 14
-          include-hidden-files: true
-
-  publish:
-    name: Publish GHCR
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: quality
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Download verified runtime bundle
-        uses: actions/download-artifact@v5
-        with:
-          name: runtime-${{ github.sha }}
-          path: .release
-
       - name: Set up Docker Buildx
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -124,6 +87,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -136,6 +100,6 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=0.2.0
+            org.opencontainers.image.version=0.2.1
           cache-from: type=gha
           cache-to: type=gha,mode=max
