@@ -16,7 +16,7 @@
 10. **运行状态与 UI 状态混淆**：每条隧道仍显示 FRPC 运行状态，但状态只能作为诊断/触发信号，绝无 per-tunnel failover 路径。
 11. **容器重启后 FRPC 不自动恢复**：已有二进制与持久化 ChmlFrp 配置时，Control Center 启动后自动拉起 FRPC；失败只报警，不阻塞 Web 控制台。
 12. **Cloudflare 同域名多 A 记录被 HashMap 吞掉**：主控台现在显示 `A 记录冲突`；Reconcile/Failover 在任何 Provider 写操作前检查受管域名 A 记录唯一性。
-13. **Release artifact glibc 兼容性**：GitHub `build.yml` 改为 `x86_64-unknown-linux-musl` 便携构建。
+13. **CI/CD 重复触发**：旧版多 workflow 会让同一 main push 被重复测试/构建；v0.1.4 收敛为唯一 `.github/workflows/ci.yml`，tag 不再单独触发。
 
 ## 仍需真实环境验证 / 后续硬化
 

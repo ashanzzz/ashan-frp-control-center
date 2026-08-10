@@ -1,3 +1,12 @@
+## v0.1.4
+
+- Fixed Axum 0.8 server compilation by importing the `put` routing function used by the tunnel update route.
+- Consolidated GitHub Actions into one authoritative `.github/workflows/ci.yml` pipeline.
+- Removed the duplicate `build.yml` and `build-push.yml` workflows.
+- Main pushes now run exactly one workflow: verify -> test -> check -> clippy -> web build -> server build -> artifact -> GHCR.
+- Pull requests run the same quality/build path but never publish images.
+- Tag pushes no longer trigger a second duplicate build.
+
 ## v0.1.3
 
 - Fix reqwest 0.13 `query` feature required by ChmlFrp and Cloudflare adapters.

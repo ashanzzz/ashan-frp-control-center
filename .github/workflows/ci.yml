@@ -1,26 +1,29 @@
-name: CI
+name: CI and publish
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ashan-frp-control-center-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
-  verify:
-    name: Static, Rust and Web checks
+  pipeline:
+    name: Test, build and publish
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Offline product-invariant checks
+      - name: Product invariant checks
         run: python3 scripts/verify.py
 
       - name: Install Rust toolchain
@@ -51,8 +54,51 @@ jobs:
       - name: Build server
         run: cargo build --release -p ashan-frp-server
 
-      - name: Verify release outputs
+      - name: Verify build outputs
         run: |
+          set -euo pipefail
           test -x target/release/ashan-frp-server
           test -f dist/public/index.html
           git diff --check
+
+      - name: Upload release bundle
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashan-frp-control-center-linux-amd64-${{ github.sha }}
+          path: |
+            target/release/ashan-frp-server
+            dist/public/
+            unraid/ashan-frp-control-center.xml
+            README.md
+            CHANGELOG.md
+            compose.yaml
+            .env.example
+          if-no-files-found: error
+          retention-days: 30
+          include-hidden-files: true
+
+      - name: Set up Docker Buildx
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish GHCR image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

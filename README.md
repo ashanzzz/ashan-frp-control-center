@@ -217,17 +217,18 @@ cargo build --release -p ashan-frp-server
 
 ## 当前安全边界
 
-`v0.1.3` 延续全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
+`v0.1.4` 延续全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
 
-## GitHub Actions 自动构建
+## GitHub Actions
 
-仓库内置三条工作流：
+仓库只保留一个自动工作流：`.github/workflows/ci.yml`。这是唯一 CI/CD 入口。
 
-- `.github/workflows/ci.yml`：Push / Pull Request / 手工触发，执行产品不变量检查、Rust tests/check/clippy、Dioxus Web 构建与 Server release 构建。
-- `.github/workflows/build.yml`：`main`、`v*` tag 或手工触发，生成可下载的 `linux-amd64` release bundle 和 SHA256。
-- `.github/workflows/build-push.yml`：质量门禁通过后构建单容器镜像并发布到 `ghcr.io/${GITHUB_REPOSITORY}`，默认分支同时生成 `latest`。
+- Push 到 `main`：静态不变量检查 → Rust test/check/clippy → Dioxus Web/WASM 构建 → Server release 构建 → 上传构建产物 → 发布 GHCR `latest` 与 `sha-*`。
+- Pull Request 到 `main`：执行同样的质量与构建检查，但不发布 GHCR。
+- Tag push：不触发额外工作流，避免同一提交因 branch + tag 产生重复构建。
+- `workflow_dispatch`：允许人工验证，但不会发布 GHCR，除非事件本身是 `main` push。
 
-Docker 发布不会绕过测试阶段；如果 Rust/Web 构建失败，则不会推送新镜像。
+旧的 `build.yml` 与 `build-push.yml` 已删除，不再存在多套工作流重复编译同一提交。
 
 ## 删除计划的安全规则
 

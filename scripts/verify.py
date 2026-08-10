@@ -58,14 +58,21 @@ if 'DnsPatch' not in all_rust or '.json(&DnsPatch { content: ip })' not in all_r
 if 'active_node_id' in (ROOT / 'migrations' / '0001_init.sql').read_text(encoding='utf-8'):
     errors.append('per-tunnel active node leaked into schema')
 
-required_workflows = [
-    ROOT / '.github/workflows/ci.yml',
-    ROOT / '.github/workflows/build.yml',
-    ROOT / '.github/workflows/build-push.yml',
-]
-for workflow in required_workflows:
-    if not workflow.exists():
-        errors.append(f'missing GitHub workflow: {workflow.relative_to(ROOT)}')
+workflow_dir = ROOT / '.github/workflows'
+workflow_files = sorted([*workflow_dir.glob('*.yml'), *workflow_dir.glob('*.yaml')])
+expected_workflow = workflow_dir / 'ci.yml'
+if workflow_files != [expected_workflow]:
+    errors.append(
+        'exactly one GitHub workflow is allowed: .github/workflows/ci.yml; found: '
+        + ', '.join(str(p.relative_to(ROOT)) for p in workflow_files)
+    )
+else:
+    workflow_text = expected_workflow.read_text(encoding='utf-8')
+    if 'branches: [main]' not in workflow_text:
+        errors.append('CI workflow must be scoped to main for push/PR automation')
+    push_block = workflow_text.split('  pull_request:', 1)[0]
+    if '\n    tags:' in push_block or '\n      tags:' in push_block:
+        errors.append('tag-triggered CI is forbidden because it duplicates the main-branch build')
 
 coordinator = (ROOT / 'apps/server/src/coordinator.rs').read_text(encoding='utf-8')
 if 'queued_global_failover' not in coordinator or 'runtime_generation' not in coordinator:

@@ -1,6 +1,6 @@
 use crate::{coordinator::Coordinator,reconcile,state::AppState};
 use ashan_frp_domain::{ApiResponse,DashboardSnapshot,ErrorResponse,ProviderHealth,RoutingUpdate,TunnelPlanInput};
-use axum::{extract::{Path,State},http::StatusCode,response::{IntoResponse,Response,Sse},routing::{get,post},Json,Router};
+use axum::{extract::{Path,State},http::StatusCode,response::{IntoResponse,Response,Sse},routing::{get,post,put},Json,Router};
 use futures_util::Stream;
 use std::{convert::Infallible,sync::Arc,time::Duration};
 use tokio_stream::{wrappers::BroadcastStream,StreamExt};
