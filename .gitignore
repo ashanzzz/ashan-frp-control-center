@@ -12,5 +12,5 @@
 .codex-runtime/
 __pycache__/
 *.pyc
-
-/.release/
+*.zip
+ashan-frp-control-center-rust-*
