@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use ashan_frp_chmlfrp::ChmlFrpClient;
 use ashan_frp_cloudflare::CloudflareClient;
 use ashan_frp_database::Database;

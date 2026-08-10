@@ -59,9 +59,9 @@ if [p.name for p in workflows] != ["ci.yml"]:
 
 workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 for required in [
-    "cargo fmt --all",
+    "cargo fmt --all -- --check",
     "cargo test --workspace --locked",
-    "cargo clippy --workspace --all-targets --locked",
+    "cargo clippy --workspace --all-targets --locked -- -D warnings",
     "--target x86_64-unknown-linux-musl",
 ]:
     if required not in workflow:

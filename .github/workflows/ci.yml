@@ -42,13 +42,13 @@ jobs:
         run: node --check web/assets/app.js
 
       - name: Format check
-        run: cargo fmt --all
+        run: cargo fmt --all -- --check
 
       - name: Unit tests
         run: cargo test --workspace --locked
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Install musl linker
         run: |
