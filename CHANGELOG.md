@@ -1,3 +1,9 @@
+## v0.1.3
+
+- Fix reqwest 0.13 `query` feature required by ChmlFrp and Cloudflare adapters.
+- Upgrade `actions/checkout` to v6 (Node 24 runtime).
+- Re-run CI-focused source review.
+
 # Changelog
 
 ## 0.1.2 - 2026-08-09
