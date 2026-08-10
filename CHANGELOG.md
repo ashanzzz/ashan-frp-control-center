@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1 - 2026-08-09
+
+- Hardened FRPC log classification and runtime-generation isolation.
+- Automatic node faults now wait for the global operation lock instead of being dropped.
+- Candidate nodes are quarantined only after confirmed node-scoped runtime failures.
+- Active-node truth is committed after FRPC validation and before DNS; DNS failures become `degraded_dns`.
+- Reconcile preflights Cloudflare/node state, verifies remote ChmlFrp convergence, and avoids unnecessary FRPC restarts.
+- Tunnel-plan deletion is guarded against remote ChmlFrp/DNS orphan creation.
+- FRPC automatically restores from the persisted ChmlFrp-generated config after container restart.
+- Duplicate managed Cloudflare A records are surfaced and block reconcile/failover preflight.
+- Added CI, downloadable Linux release artifact workflow, and quality-gated GHCR image publishing.
+- Added `docs/LOGIC_REVIEW.md`.
+
+
 ## 0.1.0 - 2026-08-09
 
 - Greenfield Rust rewrite of Ashan FRP Control Center.

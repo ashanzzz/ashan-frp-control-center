@@ -159,9 +159,11 @@ Restart FRPC
       ↓
 FRPC 运行验证
       ↓
+提交运行层 Active Node，state = dns_switching
+      ↓
 Cloudflare：全部受管 A 记录 → 新节点 realIp
       ↓
-提交新的全局 Active Node
+DNS 全部成功后 state = idle
 ```
 
 `already exist` / proxy 冲突：如果下载的本地配置预检查没有重复 Proxy Name，则按服务端冲突归类为 Node Fault，可触发全局切换；如果配置本身有重复，则归类为配置错误，不切节点。
@@ -192,7 +194,26 @@ dx build --release --platform web
 cargo build --release -p ashan-frp-server
 ```
 
-当前生成环境无法联网安装 Rust toolchain，因此 ZIP 生成前执行的是仓库结构、TOML/YAML/SQL、Git diff 与静态一致性检查；在有 Rust 的机器或 GitHub Actions 中应执行上述完整编译测试。
+本地发布包会执行离线结构、TOML/YAML/SQL、产品不变量与 Git 一致性检查；GitHub Actions 会进一步执行 Rust 单元测试、cargo check/clippy、Dioxus Web/WASM 构建、Server release 构建及 Docker/GHCR 构建。
+
+
+## 当前安全边界
+
+`v0.1.1` 的重点是全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
+
+## GitHub Actions 自动构建
+
+仓库内置三条工作流：
+
+- `.github/workflows/ci.yml`：Push / Pull Request / 手工触发，执行产品不变量检查、Rust tests/check/clippy、Dioxus Web 构建与 Server release 构建。
+- `.github/workflows/build.yml`：`main`、`v*` tag 或手工触发，生成可下载的 `linux-amd64` release bundle 和 SHA256。
+- `.github/workflows/build-push.yml`：质量门禁通过后构建单容器镜像并发布到 `ghcr.io/${GITHUB_REPOSITORY}`，默认分支同时生成 `latest`。
+
+Docker 发布不会绕过测试阶段；如果 Rust/Web 构建失败，则不会推送新镜像。
+
+## 删除计划的安全规则
+
+当前主控台不会在无法证明远端资源已清理时直接删除计划。只要同名 ChmlFrp 隧道仍存在，或者该计划管理的 Cloudflare A 记录仍存在，API 返回冲突并保留计划。这样避免本地主控台删除后留下无法追踪的远端孤儿资源。
 
 ## 文档
 
@@ -200,6 +221,7 @@ cargo build --release -p ashan-frp-server
 
 - `docs/PRODUCT_DESIGN.md`
 - `docs/FAILOVER_DESIGN.md`
+- `docs/LOGIC_REVIEW.md`
 - `docs/ARCHITECTURE.md`
 - `docs/DATA_MODEL.md`
 - `docs/TECH_STACK.md`

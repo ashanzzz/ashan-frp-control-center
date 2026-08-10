@@ -1,19 +1,58 @@
 name: CI
+
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  rust:
+  verify:
+    name: Static, Rust and Web checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Offline product-invariant checks
+        run: python3 scripts/verify.py
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.94.1
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --exclude ashan-frp-web
-      - run: cargo check --workspace --exclude ashan-frp-web
-      - run: cargo install dioxus-cli --version '^0.7' --locked
-      - run: dx build --release --platform web
-      - run: cargo build --release -p ashan-frp-server
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests
+        run: cargo test --workspace --exclude ashan-frp-web
+
+      - name: Rust check
+        run: cargo check --workspace --exclude ashan-frp-web
+
+      - name: Clippy
+        run: cargo clippy --workspace --exclude ashan-frp-web --all-targets
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --version '^0.7' --locked
+
+      - name: Build Web/WASM
+        run: dx build --release --platform web
+
+      - name: Build server
+        run: cargo build --release -p ashan-frp-server
+
+      - name: Verify release outputs
+        run: |
+          test -x target/release/ashan-frp-server
+          test -f dist/public/index.html
+          git diff --check

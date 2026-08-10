@@ -165,9 +165,20 @@ ChmlFrp 完成迁移后：
 
 如果目标节点失败，进入 Forward Recovery：把该目标节点也隔离，重新选择下一个候选节点；不要回滚到已判定故障的旧 Active。
 
+### Phase 6.5 - Commit runtime truth
+
+Phase 6 成功意味着 ChmlFrp 与 FRPC 已经实际运行在目标节点。此时先提交：
+
+```text
+active_node = target
+state = dns_switching
+```
+
+这一步发生在 DNS 之前，目的是避免 Cloudflare 更新失败时数据库仍声称旧节点是 Active，而真实 FRPC 已经运行在新节点。
+
 ### Phase 7 - Cloudflare bulk A update
 
-只有 Phase 6 成功后才修改 DNS。
+只有 Phase 6 成功并提交运行层事实后才修改 DNS。
 
 将全部本系统受管 A 记录统一从旧节点 IP 更新到新 Active Node IP。
 
@@ -177,7 +188,7 @@ ChmlFrp 完成迁移后：
 - MX/TXT/CAA 等无关记录；
 - 其他人工维护域名。
 
-### Phase 8 - Verify and commit
+### Phase 8 - Verify and finalize
 
 验证：
 
@@ -185,13 +196,7 @@ ChmlFrp 完成迁移后：
 - FRPC 运行且日志正常；
 - 所有受管 A 记录实际 IP == 新 Active Node IP。
 
-最后提交全局路由状态：
-
-```text
-active_node_id = target
-standby_node_id = next_candidate_or_null
-state = ACTIVE
-```
+全部 DNS 成功后把路由状态从 `dns_switching` 收敛到 `idle`。如果 DNS 中途失败，Active Node 保持为已经验证运行的新节点，状态变为 `degraded_dns`，后续全局 Reconcile 只需继续收敛 DNS，而不会错误回写旧节点。
 
 ## 6. UI 规则
 
@@ -205,3 +210,14 @@ Reason: SERVER_NODE_FAILURE
 ```
 
 但作用范围始终为 `ALL_MANAGED_TUNNELS`。
+
+
+## 7. 运行代次与并发安全
+
+每次启动 FRPC 都生成新的 `runtime_generation`。旧进程停止后迟到的 stdout/stderr 日志必须被丢弃，不能触发新节点的 Failover。
+
+FRPC 故障事件在全局 Reconcile/Failover 锁被占用时不会丢弃：事件等待全局锁，取得锁后再次比较 `runtime_generation`。如果期间 FRPC 已重启，则事件判定为过期并忽略；如果代次仍一致，则继续执行全局故障切换。
+
+## 8. 候选节点隔离边界
+
+只有明确的 Node 级运行故障才能把候选节点加入隔离。配置错误、认证错误、Provider API 错误、本地服务异常和单纯 readiness timeout 都不能直接把候选节点隔离。Timeout 只有在 ChmlFrp 同时报告目标节点非 Online 时才提升为 Node 级故障。

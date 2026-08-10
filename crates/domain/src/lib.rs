@@ -128,6 +128,8 @@ pub enum FrpcEventType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FrpcEvent {
     pub at: DateTime<Utc>,
+    #[serde(default)]
+    pub runtime_generation: u64,
     pub raw: String,
     pub proxy_name: Option<String>,
     pub event_type: FrpcEventType,

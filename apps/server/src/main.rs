@@ -13,7 +13,7 @@ use state::{AppConfig, AppState};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::{services::{ServeDir,ServeFile}, trace::TraceLayer};
-use tracing::{error,info};
+use tracing::{error,info,warn};
 
 #[tokio::main]
 async fn main()->Result<()> {
@@ -28,6 +28,21 @@ async fn main()->Result<()> {
     let state=Arc::new(AppState{db,chml,cf,frpc,failover_job:Arc::new(RwLock::new(None))});
     let coordinator=Coordinator::new(state.clone());
     coordinator.spawn_frpc_fault_watcher();
+
+    // High availability must survive a container restart.  If the last
+    // ChmlFrp-generated config and the frpc binary are already present, start the
+    // managed runtime automatically.  A runtime failure is reported but must not
+    // prevent the control console from coming up for recovery.
+    let has_binary=tokio::fs::try_exists(&cfg.frpc_binary).await.unwrap_or(false);
+    let has_config=tokio::fs::try_exists(&cfg.frpc_config).await.unwrap_or(false);
+    if has_binary && has_config {
+        match state.frpc.start().await {
+            Ok(())=>info!(generation=state.frpc.generation(),"restored FRPC runtime from persisted ChmlFrp config"),
+            Err(err)=>error!(error=%err,"failed to restore FRPC runtime; control console remains available"),
+        }
+    } else {
+        warn!(has_binary,has_config,"FRPC auto-start skipped until binary and ChmlFrp-generated config are available");
+    }
 
     let api_router=api::router(state.clone(),coordinator.clone());
     let index=format!("{}/index.html",cfg.web_dir.trim_end_matches('/'));

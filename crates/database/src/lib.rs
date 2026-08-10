@@ -100,10 +100,26 @@ impl Database {
         Ok(())
     }
 
-    pub async fn commit_active_node(&self, active: &str, standby: Option<&str>) -> Result<()> {
-        sqlx::query("UPDATE routing_state SET active_node=?,standby_node=?,state='idle',revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1")
+    /// Promote the FRPC-validated target before touching DNS.  From this point the
+    /// control plane's runtime truth is the new node even if Cloudflare later fails.
+    pub async fn promote_active_node(&self, active: &str, standby: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE routing_state SET active_node=?,standby_node=?,state='dns_switching',revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1")
             .bind(active).bind(standby).execute(&self.pool).await?;
         Ok(())
+    }
+
+    pub async fn finalize_active_node(&self) -> Result<()> {
+        sqlx::query("UPDATE routing_state SET state='idle',updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1")
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Preserve the most useful recovery state.  A DNS failure after target
+    /// promotion is not the same as a provider/runtime failure before promotion.
+    pub async fn mark_routing_failed(&self) -> Result<()> {
+        let current = self.routing_state().await?;
+        let state = if current.state == "dns_switching" { "degraded_dns" } else { "failed" };
+        self.set_routing_state(state).await
     }
 
     pub async fn quarantine_node(&self, node: &str, ip: Option<&str>, reason: &str, trigger_tunnel: Option<&str>, days: i64) -> Result<()> {

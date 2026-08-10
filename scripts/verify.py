@@ -58,6 +58,26 @@ if 'DnsPatch' not in all_rust or '.json(&DnsPatch { content: ip })' not in all_r
 if 'active_node_id' in (ROOT / 'migrations' / '0001_init.sql').read_text(encoding='utf-8'):
     errors.append('per-tunnel active node leaked into schema')
 
+required_workflows = [
+    ROOT / '.github/workflows/ci.yml',
+    ROOT / '.github/workflows/build.yml',
+    ROOT / '.github/workflows/build-push.yml',
+]
+for workflow in required_workflows:
+    if not workflow.exists():
+        errors.append(f'missing GitHub workflow: {workflow.relative_to(ROOT)}')
+
+coordinator = (ROOT / 'apps/server/src/coordinator.rs').read_text(encoding='utf-8')
+if 'queued_global_failover' not in coordinator or 'runtime_generation' not in coordinator:
+    errors.append('generation-safe queued global failover is missing')
+if 'promote_active_node' not in coordinator or 'finalize_active_node' not in coordinator:
+    errors.append('runtime-before-DNS active-node commit path is missing')
+if 'ALL_MANAGED_TUNNELS' in coordinator:
+    pass
+# There must be one node target for the complete plan set, never a per-tunnel node assignment.
+if 'active_node_id' in all_rust or 'standby_node_id' in all_rust:
+    errors.append('per-tunnel-style node identifier leaked into Rust source')
+
 # Obvious unfinished implementation markers are forbidden in a release archive.
 for token in ('TODO', 'FIXME', 'unimplemented!()', 'todo!()'):
     hits = []

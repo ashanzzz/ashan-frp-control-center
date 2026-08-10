@@ -18,7 +18,7 @@
 apps/control-center
 crates/domain
 crates/database
-crates/auth
+crates/auth        # planned hardening; not implemented in v0.1.1
 crates/chmlfrp
 crates/cloudflare
 crates/frpc-runtime
@@ -98,7 +98,7 @@ Cloudflare Adapter：
 
 ### failover
 
-唯一允许修改 `RoutingState.active_node_id` 的业务模块。
+唯一允许修改全局 `RoutingState.active_node` 的业务模块。
 
 所有自动/手动切换都必须经过同一状态机。
 

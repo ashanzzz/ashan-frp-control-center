@@ -72,9 +72,11 @@
 
 FRPC 运行在同一容器内，Control Center 持有 Child handle，并读取 stdout/stderr。
 
-### Authentication
+### Authentication（计划项）
 
-单管理员模型：
+目标为单管理员模型；**v0.1.1 尚未实现该层，当前仅允许部署在可信网络或外部访问控制之后。**
+
+最终模型：
 
 - Password: Argon2id
 - Session: 服务端 opaque session，不使用 JWT

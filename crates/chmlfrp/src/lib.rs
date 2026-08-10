@@ -160,7 +160,7 @@ impl RemoteTunnel {
         self.remote_endpoint.parse().unwrap_or(0)
     }
 
-    fn effective_domain(&self) -> String {
+    pub fn effective_domain(&self) -> String {
         self.band_domain.clone().unwrap_or_else(|| {
             if matches!(self.port_type.to_ascii_lowercase().as_str(), "http" | "https") {
                 self.remote_endpoint.clone()
@@ -168,6 +168,15 @@ impl RemoteTunnel {
                 String::new()
             }
         })
+    }
+
+    pub fn matches_plan_on_node(&self, plan: &TunnelPlan, node: &str) -> bool {
+        let web = matches!(plan.protocol.to_ascii_lowercase().as_str(), "http" | "https");
+        self.node == node
+            && self.local_ip == plan.local_ip
+            && self.local_port == plan.local_port
+            && self.port_type.eq_ignore_ascii_case(&plan.protocol)
+            && (!web || self.effective_domain().eq_ignore_ascii_case(&plan.domain))
     }
 }
 

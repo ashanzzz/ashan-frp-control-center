@@ -1,20 +1,35 @@
 use anyhow::{anyhow, Context, Result};
 use ashan_frp_domain::{
-    FrpcEvent, FrpcEventType, FrpcRuntimeStatus, FrpcTunnelState, LayerState, LayerStatus,
+    FaultDomain, FrpcEvent, FrpcEventType, FrpcRuntimeStatus, FrpcTunnelState, LayerState,
+    LayerStatus,
 };
 use ashan_frp_frpc_log::{classify, config_has_duplicate_proxy_names};
 use chrono::Utc;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
+use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
     sync::{broadcast, Mutex, RwLock},
 };
+
+#[derive(Debug, Error)]
+pub enum ReadinessError {
+    #[error("node failure observed from FRPC: {0}")]
+    Node(String),
+    #[error("FRPC startup/configuration failure: {0}")]
+    NonNode(String),
+    #[error("FRPC readiness timeout; connected={connected}, tunnels_not_started={missing}")]
+    Timeout { connected: bool, missing: String },
+}
 
 #[derive(Clone)]
 pub struct FrpcManager {
@@ -23,9 +38,13 @@ pub struct FrpcManager {
     child: Arc<Mutex<Option<Child>>>,
     runtime: Arc<RwLock<FrpcRuntimeStatus>>,
     tunnel_states: Arc<RwLock<HashMap<String, FrpcTunnelState>>>,
+    started_proxies: Arc<RwLock<HashSet<String>>>,
+    last_node_fault: Arc<RwLock<Option<FrpcEvent>>>,
+    last_startup_fault: Arc<RwLock<Option<FrpcEvent>>>,
     logs: Arc<RwLock<VecDeque<FrpcEvent>>>,
     tx: broadcast::Sender<FrpcEvent>,
     max_logs: usize,
+    generation: Arc<AtomicU64>,
 }
 
 impl FrpcManager {
@@ -51,14 +70,22 @@ impl FrpcManager {
                 last_error: None,
             })),
             tunnel_states: Arc::new(RwLock::new(HashMap::new())),
+            started_proxies: Arc::new(RwLock::new(HashSet::new())),
+            last_node_fault: Arc::new(RwLock::new(None)),
+            last_startup_fault: Arc::new(RwLock::new(None)),
             logs: Arc::new(RwLock::new(VecDeque::new())),
             tx,
             max_logs: max_logs.max(100),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<FrpcEvent> {
         self.tx.subscribe()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     pub async fn status(&self) -> FrpcRuntimeStatus {
@@ -102,14 +129,34 @@ impl FrpcManager {
             .collect()
     }
 
+    pub async fn read_config(&self) -> Result<Option<String>> {
+        match tokio::fs::read_to_string(&self.config).await {
+            Ok(text) => Ok(Some(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub async fn config_matches(&self, expected: &str) -> Result<bool> {
+        Ok(self.read_config().await?.as_deref() == Some(expected))
+    }
+
     pub async fn write_config(&self, text: &str, revision: i64) -> Result<()> {
+        self.write_config_with_revision(text, Some(revision)).await
+    }
+
+    pub async fn restore_config(&self, text: &str, revision: Option<i64>) -> Result<()> {
+        self.write_config_with_revision(text, revision).await
+    }
+
+    async fn write_config_with_revision(&self, text: &str, revision: Option<i64>) -> Result<()> {
         if let Some(parent) = self.config.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         let tmp = self.config.with_extension("tmp");
         tokio::fs::write(&tmp, text).await?;
         tokio::fs::rename(&tmp, &self.config).await?;
-        self.runtime.write().await.config_revision = Some(revision);
+        self.runtime.write().await.config_revision = revision;
         Ok(())
     }
 
@@ -127,13 +174,30 @@ impl FrpcManager {
         let local_dup = config_has_duplicate_proxy_names(&config_text);
 
         let mut guard = self.child.lock().await;
-        if guard.is_some() {
-            return Ok(());
+        if let Some(child) = guard.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    *guard = None;
+                    let mut runtime = self.runtime.write().await;
+                    runtime.running = false;
+                    runtime.pid = None;
+                    runtime.connected = false;
+                    runtime.last_error = Some(format!("FRPC exited before start request: {status}"));
+                }
+                Ok(None) => return Ok(()),
+                Err(err) => return Err(anyhow!("FRPC process status check failed: {err}")),
+            }
         }
 
-        // A new complete ChmlFrp configuration is a new runtime generation.
-        // Never carry old per-tunnel success states across a restart.
+        // Every start creates a new generation. Reader tasks from the previous
+        // process may still drain buffered stdout/stderr after stop(); accept_line
+        // rejects those stale lines by generation so they can never trigger a
+        // failover against the newly active node.
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.tunnel_states.write().await.clear();
+        self.started_proxies.write().await.clear();
+        *self.last_node_fault.write().await = None;
+        *self.last_startup_fault.write().await = None;
 
         let mut cmd = Command::new(&self.binary);
         cmd.arg("-c")
@@ -158,10 +222,10 @@ impl FrpcManager {
         }
 
         if let Some(stdout) = stdout {
-            self.spawn_reader(stdout, local_dup);
+            self.spawn_reader(stdout, local_dup, generation);
         }
         if let Some(stderr) = stderr {
-            self.spawn_reader(stderr, local_dup);
+            self.spawn_reader(stderr, local_dup, generation);
         }
         *guard = Some(child);
         Ok(())
@@ -186,28 +250,53 @@ impl FrpcManager {
         self.start().await
     }
 
-    /// Wait until the new complete ChmlFrp-generated configuration is actually observed
-    /// as connected and every expected tunnel has emitted a successful startup event.
+    /// Wait until the new complete ChmlFrp-generated configuration is actually
+    /// connected and every expected tunnel has emitted a successful startup event.
     ///
-    /// ChmlFrp/frpc deployments may prefix proxy names (for example token.name), so
-    /// matching accepts either an exact plan name or a `.plan-name` suffix.
-    pub async fn wait_ready(&self, expected_tunnels: &[String], timeout: Duration) -> Result<()> {
+    /// Readiness is based on the generation-scoped `ProxyStarted` set, not the
+    /// current UI status. A later local-service error may make one row red, but it
+    /// must not falsely mark a healthy FRP node as a failed standby candidate.
+    pub async fn wait_ready(
+        &self,
+        expected_tunnels: &[String],
+        timeout: Duration,
+    ) -> std::result::Result<(), ReadinessError> {
+        let generation = self.generation();
         let started = Instant::now();
         loop {
+            if self.generation() != generation {
+                return Err(ReadinessError::NonNode(
+                    "FRPC generation changed during readiness validation".into(),
+                ));
+            }
+
             let runtime = self.status().await;
+            if let Some(event) = self.last_node_fault.read().await.clone() {
+                if event.runtime_generation == generation {
+                    return Err(ReadinessError::Node(event.raw));
+                }
+            }
+            if let Some(event) = self.last_startup_fault.read().await.clone() {
+                if event.runtime_generation == generation
+                    && matches!(event.fault_domain, FaultDomain::Auth | FaultDomain::Config)
+                {
+                    return Err(ReadinessError::NonNode(event.raw));
+                }
+            }
             if !runtime.running {
-                return Err(anyhow!(
-                    "FRPC stopped while validating target node: {}",
-                    runtime.last_error.unwrap_or_else(|| "unknown exit".into())
+                return Err(ReadinessError::NonNode(
+                    runtime
+                        .last_error
+                        .unwrap_or_else(|| "FRPC exited during readiness validation".into()),
                 ));
             }
 
             if runtime.connected {
-                let states = self.tunnel_states().await;
+                let started_names = self.started_proxies.read().await;
                 let all_started = expected_tunnels.iter().all(|expected| {
-                    states.iter().any(|(actual, state)| {
-                        proxy_name_matches(actual, expected) && state.state.state == LayerState::Ok
-                    })
+                    started_names
+                        .iter()
+                        .any(|actual| proxy_name_matches(actual, expected))
                 });
                 if expected_tunnels.is_empty() || all_started {
                     return Ok(());
@@ -215,29 +304,27 @@ impl FrpcManager {
             }
 
             if started.elapsed() >= timeout {
-                let states = self.tunnel_states().await;
+                let started_names = self.started_proxies.read().await;
                 let missing = expected_tunnels
                     .iter()
                     .filter(|expected| {
-                        !states.iter().any(|(actual, state)| {
-                            proxy_name_matches(actual, expected)
-                                && state.state.state == LayerState::Ok
-                        })
+                        !started_names
+                            .iter()
+                            .any(|actual| proxy_name_matches(actual, expected))
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                return Err(anyhow!(
-                    "FRPC readiness timeout; connected={}, tunnels_not_ready={}",
-                    runtime.connected,
-                    missing.join(",")
-                ));
+                return Err(ReadinessError::Timeout {
+                    connected: runtime.connected,
+                    missing: missing.join(","),
+                });
             }
 
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
-    fn spawn_reader<R>(&self, reader: R, local_dup: bool)
+    fn spawn_reader<R>(&self, reader: R, local_dup: bool, generation: u64)
     where
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
     {
@@ -245,13 +332,19 @@ impl FrpcManager {
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                this.accept_line(line, local_dup).await;
+                this.accept_line(line, local_dup, generation).await;
             }
         });
     }
 
-    async fn accept_line(&self, line: String, local_dup: bool) {
-        let event = classify(&line, local_dup);
+    async fn accept_line(&self, line: String, local_dup: bool, generation: u64) {
+        if generation != self.generation() {
+            return;
+        }
+
+        let mut event = classify(&line, local_dup);
+        event.runtime_generation = generation;
+
         {
             let mut runtime = self.runtime.write().await;
             match event.event_type {
@@ -263,17 +356,21 @@ impl FrpcManager {
                     runtime.connected = false;
                     runtime.last_error = Some(event.raw.clone());
                 }
-                FrpcEventType::AuthFailure => {
+                FrpcEventType::AuthFailure | FrpcEventType::ConfigMismatch => {
                     runtime.last_error = Some(event.raw.clone());
                 }
                 _ => {}
             }
         }
 
-        // A confirmed server/node fault has global scope in this product.  Every
-        // managed proxy uses the same ChmlFrp node, so do not leave stale green
-        // tunnel rows while the global failover is being started.
-        if event.triggers_failover && event.fault_domain == ashan_frp_domain::FaultDomain::Node {
+        if event.event_type == FrpcEventType::ProxyStarted {
+            if let Some(name) = event.proxy_name.as_ref() {
+                self.started_proxies.write().await.insert(name.clone());
+            }
+        }
+
+        if event.triggers_failover && event.fault_domain == FaultDomain::Node {
+            *self.last_node_fault.write().await = Some(event.clone());
             let mut states = self.tunnel_states.write().await;
             for state in states.values_mut() {
                 state.state = LayerStatus {
@@ -283,6 +380,8 @@ impl FrpcManager {
                 };
                 state.last_event = Some(event.clone());
             }
+        } else if matches!(event.fault_domain, FaultDomain::Auth | FaultDomain::Config) {
+            *self.last_startup_fault.write().await = Some(event.clone());
         }
 
         if let Some(name) = event.proxy_name.clone() {
@@ -308,11 +407,13 @@ impl FrpcManager {
                     label: "节点故障".into(),
                     detail: Some(event.raw.clone()),
                 }),
-                FrpcEventType::ConfigMismatch | FrpcEventType::LocalDuplicateProxy => Some(LayerStatus {
-                    state: LayerState::Failed,
-                    label: "配置异常".into(),
-                    detail: Some(event.raw.clone()),
-                }),
+                FrpcEventType::ConfigMismatch | FrpcEventType::LocalDuplicateProxy => {
+                    Some(LayerStatus {
+                        state: LayerState::Failed,
+                        label: "配置异常".into(),
+                        detail: Some(event.raw.clone()),
+                    })
+                }
                 _ => None,
             };
             if let Some(state) = state {

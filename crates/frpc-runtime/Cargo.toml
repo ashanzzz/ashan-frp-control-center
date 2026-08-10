@@ -11,3 +11,5 @@ ashan-frp-frpc-log = { path = "../frpc-log" }
 chrono.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+thiserror.workspace = true
