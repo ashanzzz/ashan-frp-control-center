@@ -131,10 +131,7 @@ fn chmlfrp_status(
     let configuration_drift = remote.local_ip != plan.local_ip
         || remote.local_port != plan.local_port
         || !remote.port_type.eq_ignore_ascii_case(&plan.protocol)
-        || (is_web
-            && !remote
-                .effective_domain()
-                .eq_ignore_ascii_case(&plan.domain));
+        || (is_web && !remote.effective_domain().eq_ignore_ascii_case(&plan.domain));
 
     if configuration_drift {
         layer_status(LayerState::Drift, "配置不一致", None)

@@ -561,7 +561,8 @@ impl Coordinator {
             if let Err(err) = self.sync_with_retry(original, plan, target).await {
                 self.rollback_provider(job, &changed).await;
                 return Err(MigrationError::Other(err.context(format!(
-                    "ChmlFrp partial migration stopped at tunnel {}", plan.name
+                    "ChmlFrp partial migration stopped at tunnel {}",
+                    plan.name
                 ))));
             }
             changed.push((plan.clone(), original.clone()));
@@ -577,14 +578,14 @@ impl Coordinator {
             Ok(config) => config,
             Err(err) => {
                 self.rollback_provider(job, &changed).await;
-                return Err(MigrationError::Other(err.context("generate ChmlFrp target config")));
+                return Err(MigrationError::Other(
+                    err.context("generate ChmlFrp target config"),
+                ));
             }
         };
         if ashan_frp_frpc_log::config_has_duplicate_proxy_names(&config) {
             self.rollback_provider(job, &changed).await;
-            return Err(anyhow!(
-                "ChmlFrp generated config contains duplicate proxy names"
-            ).into());
+            return Err(anyhow!("ChmlFrp generated config contains duplicate proxy names").into());
         }
 
         let previous_config = self.state.frpc.read_config().await?;
@@ -598,7 +599,9 @@ impl Coordinator {
 
         if let Err(err) = self.state.frpc.write_config(&config, revision).await {
             self.rollback_provider(job, &changed).await;
-            return Err(MigrationError::Other(err.context("write target FRPC config")));
+            return Err(MigrationError::Other(
+                err.context("write target FRPC config"),
+            ));
         }
         if let Err(err) = self.state.frpc.restart().await {
             self.rollback_provider(job, &changed).await;
@@ -608,7 +611,9 @@ impl Coordinator {
             } else {
                 let _ = self.state.frpc.stop().await;
             }
-            return Err(MigrationError::Other(err.context("restart FRPC with target config")));
+            return Err(MigrationError::Other(
+                err.context("restart FRPC with target config"),
+            ));
         }
 
         self.state
