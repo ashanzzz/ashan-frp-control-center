@@ -165,12 +165,11 @@ pub fn extract_proxy_name(line: &str) -> Option<String> {
     for (i, c) in line.char_indices() {
         if c == '[' {
             start = Some(i + 1);
-        } else if c == ']' {
-            if let Some(s) = start.take()
-                && s < i
-            {
-                groups.push(line[s..i].to_string());
-            }
+        } else if c == ']'
+            && let Some(s) = start.take()
+            && s < i
+        {
+            groups.push(line[s..i].to_string());
         }
     }
     groups.into_iter().rev().find(|g| {
