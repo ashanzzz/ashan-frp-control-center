@@ -18,7 +18,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
-    sync::{broadcast, Mutex, RwLock},
+    sync::{Mutex, RwLock, broadcast},
 };
 
 #[derive(Debug, Error)]
@@ -48,11 +48,7 @@ pub struct FrpcManager {
 }
 
 impl FrpcManager {
-    pub fn new(
-        binary: impl Into<PathBuf>,
-        config: impl Into<PathBuf>,
-        max_logs: usize,
-    ) -> Self {
+    pub fn new(binary: impl Into<PathBuf>, config: impl Into<PathBuf>, max_logs: usize) -> Self {
         let binary = binary.into();
         let config = config.into();
         let (tx, _) = broadcast::channel(1024);
@@ -177,7 +173,8 @@ impl FrpcManager {
                     runtime.running = false;
                     runtime.pid = None;
                     runtime.connected = false;
-                    runtime.last_error = Some(format!("FRPC exited before start request: {status}"));
+                    runtime.last_error =
+                        Some(format!("FRPC exited before start request: {status}"));
                 }
                 Ok(None) => return Ok(()),
                 Err(err) => return Err(anyhow!("FRPC process status check failed: {err}")),
@@ -282,11 +279,9 @@ impl FrpcManager {
                 return Err(ReadinessError::NonNode(event.raw));
             }
             if !runtime.running {
-                return Err(ReadinessError::NonNode(
-                    runtime
-                        .last_error
-                        .unwrap_or_else(|| "FRPC exited during readiness validation".into()),
-                ));
+                return Err(ReadinessError::NonNode(runtime.last_error.unwrap_or_else(
+                    || "FRPC exited during readiness validation".into(),
+                )));
             }
 
             if runtime.connected {
@@ -456,7 +451,10 @@ mod tests {
     async fn stop_invalidates_the_current_runtime_generation() {
         let manager = super::FrpcManager::new("/missing/frpc", "/missing/frpc.ini", 100);
         let before = manager.generation();
-        manager.stop().await.expect("stop without child should succeed");
+        manager
+            .stop()
+            .await
+            .expect("stop without child should succeed");
         assert!(manager.generation() > before);
     }
 }
