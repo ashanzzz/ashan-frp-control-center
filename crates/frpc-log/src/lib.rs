@@ -19,7 +19,11 @@ pub fn classify(line: &str, local_config_has_duplicates: bool) -> FrpcEvent {
     // "启动成功", which can appear in unrelated component logs.
     if contains_any(
         &lower,
-        &["成功登录至服务器", "login to server success", "login to server succeeded"],
+        &[
+            "成功登录至服务器",
+            "login to server success",
+            "login to server succeeded",
+        ],
     ) {
         e.event_type = FrpcEventType::LoginSuccess;
         return e;
@@ -68,7 +72,12 @@ pub fn classify(line: &str, local_config_has_duplicates: bool) -> FrpcEvent {
     // but only after we have proven the downloaded local config itself is unique.
     if contains_any(
         &lower,
-        &["already exist", "already exists", "proxy name conflict", "隧道端口被占用"],
+        &[
+            "already exist",
+            "already exists",
+            "proxy name conflict",
+            "隧道端口被占用",
+        ],
     ) {
         if local_config_has_duplicates {
             e.event_type = FrpcEventType::LocalDuplicateProxy;
@@ -157,7 +166,9 @@ pub fn extract_proxy_name(line: &str) -> Option<String> {
         if c == '[' {
             start = Some(i + 1);
         } else if c == ']' {
-            if let Some(s) = start.take() && s < i {
+            if let Some(s) = start.take()
+                && s < i
+            {
                 groups.push(line[s..i].to_string());
             }
         }
@@ -166,7 +177,10 @@ pub fn extract_proxy_name(line: &str) -> Option<String> {
         let gl = g.to_ascii_lowercase();
         !gl.ends_with(".go")
             && !gl.contains("service.go")
-            && !matches!(gl.as_str(), "i" | "w" | "e" | "d" | "info" | "warn" | "error")
+            && !matches!(
+                gl.as_str(),
+                "i" | "w" | "e" | "d" | "info" | "warn" | "error"
+            )
     })
 }
 
@@ -231,7 +245,10 @@ mod tests {
 
     #[test]
     fn explicit_local_failure_never_triggers() {
-        let e = classify("[x] connect to local service error: connection refused", false);
+        let e = classify(
+            "[x] connect to local service error: connection refused",
+            false,
+        );
         assert!(!e.triggers_failover);
         assert_eq!(e.fault_domain, FaultDomain::Local);
     }
