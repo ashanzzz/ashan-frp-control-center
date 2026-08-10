@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2 - 2026-08-09
+
+- 完全重建 Unraid Docker XML 模板，删除旧模板内容。
+- 默认使用 Bridge 网络、单 8080 WebUI、非特权运行，不挂载 Docker Socket。
+- AppData 固定推荐 `/mnt/cache/appdata/ashan-frp-control-center -> /data`。
+- Active/Standby Node 改为可选首次启动种子，避免安装时强制填写。
+- 增加 ChmlFrp/Cloudflare API Base、FRPC 日志缓存与 Rust 日志等级高级选项。
+- 模板说明明确全局节点模型：任何确认的远端节点故障只允许触发 ALL-TUNNELS `GLOBAL_FAILOVER`。
+
 ## 0.1.1 - 2026-08-09
 
 - Hardened FRPC log classification and runtime-generation isolation.

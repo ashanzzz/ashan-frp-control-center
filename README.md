@@ -81,6 +81,24 @@ Dioxus 0.7 Fullstack/工具链围绕 Axum 构建；本仓库采用“Dioxus 静�
 - https://docs.chmlfrp.net/API/v2/Node_operations/nodeinfo.html
 - https://developers.cloudflare.com/api/resources/dns/subresources/records/
 
+## Unraid 模板
+
+仓库内置 `unraid/ashan-frp-control-center.xml`。模板采用 **Bridge** 网络，只映射 WebUI `8080/tcp`，不启用特权模式、不挂载 Docker Socket。
+
+持久化目录固定推荐使用 Cache：
+
+```text
+/mnt/cache/appdata/ashan-frp-control-center -> /data
+```
+
+FRPC Linux amd64 二进制放置于：
+
+```text
+/mnt/cache/appdata/ashan-frp-control-center/frpc/frpc
+```
+
+并确保其具有可执行权限。`ACTIVE_NODE` / `STANDBY_NODE` 只是首次数据库为空时的可选种子；已有 routing state 后，活动节点不得通过环境变量绕过 `GLOBAL_FAILOVER` 直接切换。
+
 ## 本地 / Unraid 部署
 
 ### 1. 准备数据目录
@@ -199,7 +217,7 @@ cargo build --release -p ashan-frp-server
 
 ## 当前安全边界
 
-`v0.1.1` 的重点是全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
+`v0.1.2` 延续全局编排/故障切换正确性，HTTP API 尚未实现设计文档中的单管理员登录会话。因此当前版本只能部署在可信 LAN / VPN / 已有外部访问控制后面，**不要直接暴露到公网**。后续认证实现应使用单管理员 + 服务端 Session，而不是在浏览器长期保存 Provider Token。
 
 ## GitHub Actions 自动构建
 
