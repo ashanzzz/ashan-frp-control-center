@@ -108,7 +108,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download verified runtime bundle
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: runtime-${{ github.sha }}
           path: .release
