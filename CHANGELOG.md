@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 - 2026-08-10
+
+- Make CI source-preserving: `cargo fmt --all -- --check`, strict Clippy, committed `Cargo.lock`, and a final clean-worktree assertion.
+- Refresh GitHub Actions to current Node 24-era majors (`checkout@v7`, Buildx/Login v4, Build/Push v7).
+- Keep one CI workflow and one job; pull requests validate only while `main` publishes GHCR.
+- Keep Dependabot as one weekly multi-ecosystem PR and restrict Cargo automation to lockfile-only updates.
+- Align workspace package and OCI image metadata on version 0.2.2.
+
 ## 0.2.1 - 2026-08-10
 
 ### CI/CD and Build Cleanups
