@@ -473,7 +473,8 @@ impl Coordinator {
         if dns_required && !self.state.cf.configured() {
             return Err(anyhow!(
                 "failover preflight failed: managed DNS exists but Cloudflare is not configured"
-            ).into());
+            )
+            .into());
         }
         if dns_required {
             let records = self
