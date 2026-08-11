@@ -69,7 +69,10 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
         )
         .route("/api/v1/chmlfrp/diagnostics", post(chmlfrp_diagnostics))
         .route("/api/v1/tunnels/import", post(import_remote_tunnel))
-        .route("/api/v1/tunnels/import-all", post(import_all_remote_tunnels))
+        .route(
+            "/api/v1/tunnels/import-all",
+            post(import_all_remote_tunnels),
+        )
         .route("/api/v1/tunnels/{id}/unmanage", post(unmanage_tunnel))
         .route("/api/v1/routing/bootstrap", post(bootstrap_routing))
         .route(
@@ -611,10 +614,9 @@ fn remote_boolish(value: &str) -> bool {
 fn mutation_from_remote(tunnel: &RemoteTunnel) -> Result<RemoteTunnelMutation, ApiError> {
     let protocol = tunnel.port_type.trim().to_ascii_lowercase();
     let remote_port = if matches!(protocol.as_str(), "tcp" | "udp") {
-        tunnel
-            .remote_endpoint
-            .parse::<i64>()
-            .map_err(|_| ApiError::bad_request("当前 TCP/UDP 远端端口无法解析，不能执行安全写入测试"))?
+        tunnel.remote_endpoint.parse::<i64>().map_err(|_| {
+            ApiError::bad_request("当前 TCP/UDP 远端端口无法解析，不能执行安全写入测试")
+        })?
     } else {
         0
     };
@@ -982,17 +984,11 @@ async fn managed_plan_for_dns(
     record_id: &str,
     name: &str,
 ) -> Result<Option<TunnelPlan>, ApiError> {
-    Ok(state
-        .app
-        .db
-        .list_tunnels()
-        .await?
-        .into_iter()
-        .find(|plan| {
-            plan.dns_managed
-                && (plan.cloudflare_record_id.as_deref() == Some(record_id)
-                    || plan.domain.eq_ignore_ascii_case(name))
-        }))
+    Ok(state.app.db.list_tunnels().await?.into_iter().find(|plan| {
+        plan.dns_managed
+            && (plan.cloudflare_record_id.as_deref() == Some(record_id)
+                || plan.domain.eq_ignore_ascii_case(name))
+    }))
 }
 
 async fn create_dns_record(
@@ -1126,7 +1122,12 @@ async fn dns_diagnostics(State(state): State<ApiState>) -> ApiResult<serde_json:
         content: "ashan-api-test-updated".to_owned(),
         ..create_input
     };
-    let updated = match state.app.cf.update_dns_record(&created.id, &update_input).await {
+    let updated = match state
+        .app
+        .cf
+        .update_dns_record(&created.id, &update_input)
+        .await
+    {
         Ok(record) => record,
         Err(error) => {
             let _ = state.app.cf.delete_dns_record(&created.id).await;

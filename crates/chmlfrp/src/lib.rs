@@ -182,10 +182,7 @@ impl ChmlFrpClient {
             .ok_or_else(|| anyhow!("ChmlFrp create_tunnel returned no data"))
     }
 
-    pub async fn create_remote_tunnel(
-        &self,
-        input: &RemoteTunnelMutation,
-    ) -> Result<RemoteTunnel> {
+    pub async fn create_remote_tunnel(&self, input: &RemoteTunnelMutation) -> Result<RemoteTunnel> {
         let config = self.require_token()?;
         let payload = TunnelMutation::from_remote_input(&config.token, input);
         let response: Envelope<RemoteTunnel> = self
