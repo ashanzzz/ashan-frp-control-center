@@ -182,6 +182,72 @@ impl ChmlFrpClient {
             .ok_or_else(|| anyhow!("ChmlFrp create_tunnel returned no data"))
     }
 
+    pub async fn create_remote_tunnel(
+        &self,
+        input: &RemoteTunnelMutation,
+    ) -> Result<RemoteTunnel> {
+        let config = self.require_token()?;
+        let payload = TunnelMutation::from_remote_input(&config.token, input);
+        let response: Envelope<RemoteTunnel> = self
+            .http
+            .post(format!("{}/create_tunnel", config.base_url))
+            .json(&payload)
+            .send()
+            .await
+            .with_context(|| format!("create ChmlFrp tunnel {}", input.tunnel_name))?
+            .error_for_status()
+            .with_context(|| {
+                format!(
+                    "ChmlFrp create_tunnel HTTP status for {}",
+                    input.tunnel_name
+                )
+            })?
+            .json()
+            .await
+            .with_context(|| {
+                format!(
+                    "decode ChmlFrp create_tunnel response for {}",
+                    input.tunnel_name
+                )
+            })?;
+        ensure_success(&response.state, response.code, &response.msg)?;
+        response
+            .data
+            .ok_or_else(|| anyhow!("ChmlFrp create_tunnel returned no data"))
+    }
+
+    pub async fn update_remote_tunnel(&self, input: &RemoteTunnelMutation) -> Result<()> {
+        let config = self.require_token()?;
+        let payload = TunnelMutation::from_remote_input(&config.token, input);
+        let response: Envelope<serde_json::Value> = self
+            .http
+            .post(format!("{}/update_tunnel", config.base_url))
+            .form(&payload)
+            .send()
+            .await
+            .with_context(|| format!("update ChmlFrp tunnel {}", input.tunnel_name))?
+            .error_for_status()
+            .with_context(|| {
+                format!(
+                    "ChmlFrp update_tunnel HTTP status for {}",
+                    input.tunnel_name
+                )
+            })?
+            .json()
+            .await
+            .with_context(|| {
+                format!(
+                    "decode ChmlFrp update_tunnel response for {}",
+                    input.tunnel_name
+                )
+            })?;
+        ensure_success(&response.state, response.code, &response.msg)
+    }
+
+    pub const fn delete_tunnel_supported(&self) -> bool {
+        false
+    }
+
     /// Reconcile one existing provider resource to the control-center plan and the
     /// single global target node. This is a provider operation; failover remains
     /// global and never calls this method for one tunnel in isolation.
@@ -336,6 +402,29 @@ pub struct NodeInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteTunnelMutation {
+    pub tunnel_name: String,
+    pub node: String,
+    pub port_type: String,
+    pub local_ip: String,
+    pub local_port: i64,
+    #[serde(default)]
+    pub remote_port: i64,
+    #[serde(default)]
+    pub domain: String,
+    #[serde(default)]
+    pub encryption: bool,
+    #[serde(default = "default_compression")]
+    pub compression: bool,
+    #[serde(default)]
+    pub extra_params: String,
+}
+
+fn default_compression() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteTunnel {
     #[serde(default, rename = "tunnelID", alias = "id")]
     pub tunnel_id: i64,
@@ -442,6 +531,30 @@ struct TunnelMutation {
 }
 
 impl TunnelMutation {
+    fn from_remote_input(token: &str, input: &RemoteTunnelMutation) -> Self {
+        let is_web = matches!(
+            input.port_type.to_ascii_lowercase().as_str(),
+            "http" | "https"
+        );
+        Self {
+            token: token.to_owned(),
+            tunnelname: input.tunnel_name.trim().to_owned(),
+            node: input.node.trim().to_owned(),
+            porttype: input.port_type.trim().to_ascii_lowercase(),
+            localip: input.local_ip.trim().to_owned(),
+            localport: input.local_port,
+            remoteport: if is_web { 0 } else { input.remote_port },
+            encryption: input.encryption,
+            compression: input.compression,
+            extraparams: input.extra_params.clone(),
+            banddomain: if is_web {
+                input.domain.trim().to_owned()
+            } else {
+                String::new()
+            },
+        }
+    }
+
     fn from_plan(token: &str, plan: &TunnelPlan, node: &str, remote_port: i64) -> Self {
         Self {
             token: token.to_owned(),

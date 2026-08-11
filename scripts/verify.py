@@ -113,6 +113,21 @@ for required in [
     if required not in web_js:
         errors.append(f"WebUI provider setup marker missing: {required}")
 
+for required in [
+    "/api/v1/chmlfrp/tunnels",
+    "/api/v1/chmlfrp/tunnels/${id}/test-write",
+    "/api/v1/dns/records",
+    "/api/v1/dns/diagnostics",
+    "/api/v1/routing/bootstrap",
+    "Connected",
+    "解除纳管",
+    "dns-restore",
+]:
+    if required not in web_js:
+        errors.append(f"v0.4 resource-console marker missing: {required}")
+if '>Configured<' in web_js or '"Configured"' in web_js:
+    errors.append("Provider UI must not use Configured as the terminal live status")
+
 dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 if "cargo build" in dockerfile or "dx build" in dockerfile or "FROM rust:" in dockerfile:
     errors.append("Dockerfile must package the verified runtime artifact; it must not rebuild Rust/WebUI")

@@ -15,8 +15,9 @@
     <aside class="sidebar">
       <div class="brand"><strong>Ashan FRP</strong><span>Control Center</span></div>
       <nav id="nav">
-        <button data-page="control" class="active">隧道主控台</button>
-        <button data-page="nodes">ChmlFrp</button>
+        <button data-page="overview" class="active">概览</button>
+        <button data-page="tunnels">隧道</button>
+        <button data-page="chmlfrp">ChmlFrp</button>
         <button data-page="dns">DNS</button>
         <button data-page="frpc">FRPC</button>
         <button data-page="activity">活动</button>
@@ -27,12 +28,12 @@
     <main>
       <header class="topbar">
         <div>
-          <h1 id="page-title">隧道主控台</h1>
-          <p id="page-subtitle">所有隧道统一节点，FRPC 日志驱动全局故障切换</p>
+          <h1 id="page-title">概览</h1>
+          <p id="page-subtitle">全局路由、Provider、FRPC 与受管资源健康状态</p>
         </div>
-        <div class="actions">
+        <div class="actions global-actions">
           <button id="reconcile-btn">全局同步</button>
-          <button id="failover-btn" class="danger">手动全局切换</button>
+          <button id="failover-btn" class="danger">手动 GLOBAL FAILOVER</button>
         </div>
       </header>
       <div id="alert"></div>
@@ -45,7 +46,7 @@
     <form id="tunnel-form" method="dialog">
       <input type="hidden" id="tunnel-id">
       <h2 id="tunnel-dialog-title">新增计划隧道</h2>
-      <p class="muted">节点不属于单条隧道。所有计划统一使用当前全局活动节点。</p>
+      <p class="muted">计划描述 Ashan 的 desired state；所有受管隧道统一使用 ACTIVE 节点。</p>
       <label>隧道名<input id="tunnel-name" required autocomplete="off"></label>
       <div class="form-grid">
         <label>本地 IP<input id="tunnel-ip" value="192.168.8.11" required></label>
@@ -53,11 +54,77 @@
       </div>
       <div class="form-grid">
         <label>协议<select id="tunnel-protocol"><option>http</option><option>https</option><option>tcp</option><option>udp</option></select></label>
-        <label class="check"><input id="tunnel-dns" type="checkbox" checked> 管理 Cloudflare A 记录</label>
+        <label class="check"><input id="tunnel-dns" type="checkbox"> 由 Ashan HA 管理 Cloudflare A 记录</label>
       </div>
-      <label>域名（HTTP/S 或管理 DNS 时必填）<input id="tunnel-domain" autocomplete="off"></label>
+      <label>域名（HTTP/S 或启用 DNS 纳管时必填）<input id="tunnel-domain" autocomplete="off"></label>
+      <div class="locked-field">节点：<strong id="plan-node-label">由 GLOBAL ROUTING 管理</strong></div>
       <div id="dialog-error" class="form-error"></div>
       <div class="dialog-actions"><button type="button" id="dialog-cancel" class="ghost">取消</button><button type="submit">保存计划</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="remote-tunnel-dialog" class="wide-dialog">
+    <form id="remote-tunnel-form" method="dialog">
+      <input type="hidden" id="remote-tunnel-id">
+      <h2 id="remote-tunnel-title">创建 ChmlFrp 隧道</h2>
+      <p class="muted">此处直接操作 ChmlFrp 远端资源。已纳管隧道不能在这里绕过 GLOBAL ROUTING 修改。</p>
+      <div class="form-grid">
+        <label>隧道名<input id="remote-name" required autocomplete="off"></label>
+        <label>节点<select id="remote-node" required></select></label>
+      </div>
+      <div class="form-grid">
+        <label>协议<select id="remote-protocol"><option>http</option><option>https</option><option>tcp</option><option>udp</option></select></label>
+        <label>本地 IP<input id="remote-local-ip" value="192.168.8.11" required></label>
+      </div>
+      <div class="form-grid">
+        <label>本地端口<input id="remote-local-port" type="number" min="1" max="65535" required></label>
+        <label id="remote-port-field">外网端口<input id="remote-port" type="number" min="1" max="65535"></label>
+      </div>
+      <label id="remote-domain-field">域名<input id="remote-domain" autocomplete="off"></label>
+      <div class="form-grid">
+        <label class="check compact-check"><input id="remote-encryption" type="checkbox"> 加密</label>
+        <label class="check compact-check"><input id="remote-compression" type="checkbox" checked> 压缩</label>
+      </div>
+      <label>Extra Params<input id="remote-extra" autocomplete="off"></label>
+      <div id="remote-dialog-error" class="form-error"></div>
+      <div class="dialog-actions"><button type="button" id="remote-dialog-cancel" class="ghost">取消</button><button type="submit">保存到 ChmlFrp</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="dns-dialog" class="wide-dialog">
+    <form id="dns-form" method="dialog">
+      <input type="hidden" id="dns-id">
+      <h2 id="dns-dialog-title">添加 DNS Record</h2>
+      <p class="muted">直接操作当前 Cloudflare Zone。由 Ashan HA 管理的记录必须先解除 DNS 纳管。</p>
+      <div class="form-grid">
+        <label>类型<select id="dns-type"><option>A</option><option>AAAA</option><option>CNAME</option><option>TXT</option><option>MX</option></select></label>
+        <label>名称<input id="dns-name" required autocomplete="off"></label>
+      </div>
+      <label>内容<input id="dns-content" required autocomplete="off"></label>
+      <div class="form-grid">
+        <label>TTL<select id="dns-ttl"><option value="1">Auto</option><option value="60">60 秒</option><option value="300">5 分钟</option><option value="600">10 分钟</option><option value="3600">1 小时</option><option value="86400">1 天</option></select></label>
+        <label id="dns-priority-field">Priority<input id="dns-priority" type="number" min="0" max="65535" value="10"></label>
+      </div>
+      <label id="dns-proxy-field" class="check compact-check"><input id="dns-proxied" type="checkbox"> Cloudflare Proxy</label>
+      <label>Comment<input id="dns-comment" autocomplete="off"></label>
+      <div id="dns-dialog-error" class="form-error"></div>
+      <div class="dialog-actions"><button type="button" id="dns-dialog-cancel" class="ghost">取消</button><button type="submit">保存 DNS</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="bootstrap-dialog" class="wide-dialog">
+    <form id="bootstrap-form" method="dialog">
+      <h2>初始化 GLOBAL ROUTING</h2>
+      <p class="muted">这一步只建立 ACTIVE / STANDBY 策略，不会立即搬迁隧道。确认后再执行“全局同步”。</p>
+      <div id="bootstrap-distribution" class="distribution"></div>
+      <div class="form-grid">
+        <label>ACTIVE<select id="bootstrap-active" required></select></label>
+        <label>STANDBY<select id="bootstrap-standby"></select></label>
+      </div>
+      <label>故障节点隔离天数<input id="bootstrap-days" type="number" min="1" max="3650" value="30"></label>
+      <label class="check compact-check"><input id="bootstrap-enabled" type="checkbox" checked> 启用 FRPC 日志驱动自动故障切换</label>
+      <div id="bootstrap-error" class="form-error"></div>
+      <div class="dialog-actions"><button type="button" id="bootstrap-cancel" class="ghost">取消</button><button type="submit">确认初始化</button></div>
     </form>
   </dialog>
 

@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_version_tags:
-        description: 'Publish version tags such as 0.3.0 and v0.3.0'
+        description: 'Publish version tags such as 0.4.0 and v0.4.0'
         required: false
         type: boolean
         default: true
@@ -182,16 +182,16 @@ jobs:
       #   latest
       #   sha-xxxxxxxx
       #
-      # Git tag v0.3.0:
+      # Git tag v0.4.0:
       #   latest
-      #   0.3.0
-      #   v0.3.0
+      #   0.4.0
+      #   v0.4.0
       #   sha-xxxxxxxx
       #
       # workflow_dispatch:
       #   latest
-      #   0.3.0
-      #   v0.3.0
+      #   0.4.0
+      #   v0.4.0
       #   sha-xxxxxxxx
       # ---------------------------------------------------------
 

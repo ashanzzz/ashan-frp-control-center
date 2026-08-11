@@ -33,7 +33,6 @@ impl CloudflareClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .context("build Cloudflare HTTP client")?;
-
         Ok(Self {
             http,
             config: Arc::new(RwLock::new(CloudflareConfig {
@@ -75,11 +74,10 @@ impl CloudflareClient {
         !self.snapshot().token.trim().is_empty()
     }
 
-    pub async fn list_a_records(&self) -> Result<Vec<DnsRecord>> {
+    pub async fn list_dns_records(&self) -> Result<Vec<DnsRecord>> {
         let config = self.require_config()?;
         let mut page = 1_u64;
         let mut records = Vec::new();
-
         loop {
             let page_value = page.to_string();
             let response: CfEnvelope<Vec<DnsRecord>> = self
@@ -89,20 +87,15 @@ impl CloudflareClient {
                     config.base_url, config.zone_id
                 ))
                 .bearer_auth(&config.token)
-                .query(&[
-                    ("type", "A"),
-                    ("per_page", "500"),
-                    ("page", page_value.as_str()),
-                ])
+                .query(&[("per_page", "500"), ("page", page_value.as_str())])
                 .send()
                 .await
-                .with_context(|| format!("list Cloudflare A records page {page}"))?
+                .with_context(|| format!("list Cloudflare DNS records page {page}"))?
                 .error_for_status()
-                .with_context(|| format!("Cloudflare A-record HTTP status page {page}"))?
+                .with_context(|| format!("Cloudflare DNS-record HTTP status page {page}"))?
                 .json()
                 .await
-                .with_context(|| format!("decode Cloudflare A-record response page {page}"))?;
-
+                .with_context(|| format!("decode Cloudflare DNS-record response page {page}"))?;
             let total_pages = response
                 .result_info
                 .as_ref()
@@ -110,14 +103,107 @@ impl CloudflareClient {
                 .unwrap_or(page);
             let mut current = ensure_success(response)?;
             records.append(&mut current);
-
             if page >= total_pages {
                 break;
             }
             page += 1;
         }
-
         Ok(records)
+    }
+
+    pub async fn list_a_records(&self) -> Result<Vec<DnsRecord>> {
+        Ok(self
+            .list_dns_records()
+            .await?
+            .into_iter()
+            .filter(|record| record.record_type.eq_ignore_ascii_case("A"))
+            .collect())
+    }
+
+    pub async fn get_dns_record(&self, record_id: &str) -> Result<DnsRecord> {
+        let config = self.require_config()?;
+        let response: CfEnvelope<DnsRecord> = self
+            .http
+            .get(format!(
+                "{}/zones/{}/dns_records/{}",
+                config.base_url, config.zone_id, record_id
+            ))
+            .bearer_auth(&config.token)
+            .send()
+            .await
+            .with_context(|| format!("read Cloudflare DNS record {record_id}"))?
+            .error_for_status()
+            .with_context(|| format!("Cloudflare DNS-record HTTP status for {record_id}"))?
+            .json()
+            .await
+            .with_context(|| format!("decode Cloudflare DNS record {record_id}"))?;
+        ensure_success(response)
+    }
+
+    pub async fn create_dns_record(&self, input: &DnsRecordMutation) -> Result<DnsRecord> {
+        let config = self.require_config()?;
+        let response: CfEnvelope<DnsRecord> = self
+            .http
+            .post(format!(
+                "{}/zones/{}/dns_records",
+                config.base_url, config.zone_id
+            ))
+            .bearer_auth(&config.token)
+            .json(input)
+            .send()
+            .await
+            .with_context(|| format!("create Cloudflare DNS record {}", input.name))?
+            .error_for_status()
+            .with_context(|| format!("Cloudflare DNS create HTTP status for {}", input.name))?
+            .json()
+            .await
+            .with_context(|| format!("decode Cloudflare DNS create for {}", input.name))?;
+        ensure_success(response)
+    }
+
+    pub async fn update_dns_record(
+        &self,
+        record_id: &str,
+        input: &DnsRecordMutation,
+    ) -> Result<DnsRecord> {
+        let config = self.require_config()?;
+        let response: CfEnvelope<DnsRecord> = self
+            .http
+            .patch(format!(
+                "{}/zones/{}/dns_records/{}",
+                config.base_url, config.zone_id, record_id
+            ))
+            .bearer_auth(&config.token)
+            .json(input)
+            .send()
+            .await
+            .with_context(|| format!("update Cloudflare DNS record {record_id}"))?
+            .error_for_status()
+            .with_context(|| format!("Cloudflare DNS update HTTP status for {record_id}"))?
+            .json()
+            .await
+            .with_context(|| format!("decode Cloudflare DNS update for {record_id}"))?;
+        ensure_success(response)
+    }
+
+    pub async fn delete_dns_record(&self, record_id: &str) -> Result<String> {
+        let config = self.require_config()?;
+        let response: CfEnvelope<RecordDeleteResult> = self
+            .http
+            .delete(format!(
+                "{}/zones/{}/dns_records/{}",
+                config.base_url, config.zone_id, record_id
+            ))
+            .bearer_auth(&config.token)
+            .send()
+            .await
+            .with_context(|| format!("delete Cloudflare DNS record {record_id}"))?
+            .error_for_status()
+            .with_context(|| format!("Cloudflare DNS delete HTTP status for {record_id}"))?
+            .json()
+            .await
+            .with_context(|| format!("decode Cloudflare DNS delete for {record_id}"))?;
+        Ok(ensure_success(response)?.id)
     }
 
     pub async fn upsert_a_record(
@@ -128,15 +214,13 @@ impl CloudflareClient {
     ) -> Result<DnsRecord> {
         let config = self.require_config()?;
         let request = if let Some(record) = existing {
-            // Failover changes only the address. PATCHing only `content` preserves
-            // TTL, proxied/orange-cloud mode, comments and other record settings.
             self.http
                 .patch(format!(
                     "{}/zones/{}/dns_records/{}",
                     config.base_url, config.zone_id, record.id
                 ))
                 .bearer_auth(&config.token)
-                .json(&DnsPatch { content: ip })
+                .json(&DnsContentPatch { content: ip })
         } else {
             self.http
                 .post(format!(
@@ -144,16 +228,16 @@ impl CloudflareClient {
                     config.base_url, config.zone_id
                 ))
                 .bearer_auth(&config.token)
-                .json(&DnsMutation {
-                    record_type: "A",
-                    name,
-                    content: ip,
+                .json(&DnsRecordMutation {
+                    record_type: "A".to_owned(),
+                    name: name.to_owned(),
+                    content: ip.to_owned(),
                     ttl: 1,
-                    proxied: false,
-                    comment: Some("Managed by Ashan FRP Control Center"),
+                    proxied: Some(false),
+                    priority: None,
+                    comment: Some("Managed by Ashan FRP Control Center".to_owned()),
                 })
         };
-
         let response: CfEnvelope<DnsRecord> = request
             .send()
             .await
@@ -271,38 +355,56 @@ pub struct CloudflareZone {
     pub status: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct TokenVerifyResult {
-    status: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsRecord {
     pub id: String,
     pub name: String,
     #[serde(rename = "type")]
     pub record_type: String,
+    #[serde(default)]
     pub content: String,
     #[serde(default)]
     pub proxied: bool,
     #[serde(default)]
     pub ttl: i64,
+    #[serde(default)]
+    pub priority: Option<i64>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub created_on: Option<String>,
+    #[serde(default)]
+    pub modified_on: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct DnsPatch<'a> {
-    content: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct DnsMutation<'a> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsRecordMutation {
     #[serde(rename = "type")]
-    record_type: &'a str,
-    name: &'a str,
+    pub record_type: String,
+    pub name: String,
+    pub content: String,
+    pub ttl: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxied: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DnsContentPatch<'a> {
     content: &'a str,
-    ttl: i64,
-    proxied: bool,
-    comment: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenVerifyResult {
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordDeleteResult {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
