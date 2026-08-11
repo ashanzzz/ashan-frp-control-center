@@ -86,8 +86,15 @@ if "git diff --exit-code" not in workflow:
 cargo_path = ROOT / "Cargo.toml"
 cargo = cargo_path.read_text(encoding="utf-8")
 workspace_version = tomllib.loads(cargo)["workspace"]["package"]["version"]
-if f"org.opencontainers.image.version={workspace_version}" not in workflow:
-    errors.append("CI OCI version label must match workspace package version")
+literal_oci_version = f"org.opencontainers.image.version={workspace_version}"
+dynamic_oci_version = "org.opencontainers.image.version=${{ steps.version.outputs.version }}"
+if literal_oci_version not in workflow and dynamic_oci_version not in workflow:
+    errors.append(
+        "CI OCI version label must match workspace package version "
+        "or use the validated dynamic workspace version"
+    )
+if 'print(data["workspace"]["package"]["version"])' not in workflow:
+    errors.append("CI dynamic version must be read from workspace.package.version")
 if "apps/web" in cargo or (ROOT / "Dioxus.toml").exists():
     errors.append("compiled Web/WASM frontend is forbidden; WebUI must be static Axum assets")
 if not (ROOT / "web" / "index.html").is_file() or not (ROOT / "web" / "assets" / "app.js").is_file():
