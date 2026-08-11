@@ -2,10 +2,22 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+
   pull_request:
-    branches: [main]
+    branches:
+      - main
+
   workflow_dispatch:
+    inputs:
+      publish_version_tags:
+        description: 'Publish version tags such as 0.3.0 and v0.3.0'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -13,18 +25,33 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   ci:
     name: Test, build and publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     permissions:
       contents: read
       packages: write
+
     steps:
+      # ---------------------------------------------------------
+      # 1. Checkout
+      # ---------------------------------------------------------
+
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # ---------------------------------------------------------
+      # 2. Rust
+      # ---------------------------------------------------------
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -35,6 +62,57 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      # ---------------------------------------------------------
+      # 3. Read project version from Cargo.toml
+      # ---------------------------------------------------------
+
+      - name: Read project version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(python3 - <<'PY'
+          import tomllib
+
+          with open("Cargo.toml", "rb") as f:
+              data = tomllib.load(f)
+
+          print(data["workspace"]["package"]["version"])
+          PY
+          )"
+
+          if [ -z "$VERSION" ]; then
+            echo "Failed to read workspace.package.version from Cargo.toml"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Project version: $VERSION"
+
+      # ---------------------------------------------------------
+      # 4. Validate Git tag against Cargo.toml
+      # ---------------------------------------------------------
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+
+          echo "Cargo version: $VERSION"
+          echo "Git tag version: $TAG_VERSION"
+
+          if [ "$TAG_VERSION" != "$VERSION" ]; then
+            echo "ERROR: Git tag v$TAG_VERSION does not match Cargo.toml version $VERSION"
+            exit 1
+          fi
+
+          echo "Release tag matches Cargo.toml version."
+
+      # ---------------------------------------------------------
+      # 5. Repository checks
+      # ---------------------------------------------------------
+
       - name: Repository invariants
         run: python3 scripts/verify.py
 
@@ -44,11 +122,23 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      # ---------------------------------------------------------
+      # 6. Tests
+      # ---------------------------------------------------------
+
       - name: Unit tests
         run: cargo test --workspace --locked
 
+      # ---------------------------------------------------------
+      # 7. Clippy
+      # ---------------------------------------------------------
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # ---------------------------------------------------------
+      # 8. Static Linux amd64 release build
+      # ---------------------------------------------------------
 
       - name: Install musl linker
         run: |
@@ -60,7 +150,16 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-        run: cargo build --release --locked -p ashan-frp-server --target x86_64-unknown-linux-musl
+        run: |
+          cargo build \
+            --release \
+            --locked \
+            -p ashan-frp-server \
+            --target x86_64-unknown-linux-musl
+
+      # ---------------------------------------------------------
+      # 9. Runtime bundle
+      # ---------------------------------------------------------
 
       - name: Stage runtime bundle
         env:
@@ -72,35 +171,140 @@ jobs:
           test -x .release/ashan-frp-server
           test -f .release/web/index.html
           test -f .release/web/assets/app.js
+
           git diff --exit-code
           git diff --check
 
+      # ---------------------------------------------------------
+      # 10. Generate Docker tags
+      #
+      # main:
+      #   latest
+      #   sha-xxxxxxxx
+      #
+      # Git tag v0.3.0:
+      #   latest
+      #   0.3.0
+      #   v0.3.0
+      #   sha-xxxxxxxx
+      #
+      # workflow_dispatch:
+      #   latest
+      #   0.3.0
+      #   v0.3.0
+      #   sha-xxxxxxxx
+      # ---------------------------------------------------------
+
+      - name: Generate Docker tags
+        id: docker_tags
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA_TAG="sha-${GITHUB_SHA}"
+
+          {
+            echo 'tags<<EOF'
+
+            echo "${REGISTRY}/${IMAGE_NAME}:${SHA_TAG}"
+
+            if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+              echo "${REGISTRY}/${IMAGE_NAME}:latest"
+            fi
+
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              echo "${REGISTRY}/${IMAGE_NAME}:latest"
+              echo "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+              echo "${REGISTRY}/${IMAGE_NAME}:v${VERSION}"
+            fi
+
+            if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+              echo "${REGISTRY}/${IMAGE_NAME}:latest"
+
+              if [ "${{ inputs.publish_version_tags }}" = "true" ]; then
+                echo "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+                echo "${REGISTRY}/${IMAGE_NAME}:v${VERSION}"
+              fi
+            fi
+
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Docker tags:"
+          echo "${REGISTRY}/${IMAGE_NAME}:${SHA_TAG}"
+
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            echo "${REGISTRY}/${IMAGE_NAME}:latest"
+          fi
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "${REGISTRY}/${IMAGE_NAME}:latest"
+            echo "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+            echo "${REGISTRY}/${IMAGE_NAME}:v${VERSION}"
+          fi
+
+      # ---------------------------------------------------------
+      # 11. Docker / GHCR
+      # ---------------------------------------------------------
+
       - name: Set up Docker Buildx
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request'
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+
+          tags: ${{ steps.docker_tags.outputs.tags }}
+
           labels: |
+            org.opencontainers.image.title=Ashan FRP Control Center
+            org.opencontainers.image.description=ChmlFrp high-availability control plane
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=0.3.0
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ---------------------------------------------------------
+      # 12. Build summary
+      # ---------------------------------------------------------
+
+      - name: Publish summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Ashan FRP Control Center"
+            echo
+            echo "**Version:** \`${{ steps.version.outputs.version }}\`"
+            echo
+            echo "**Commit:** \`${GITHUB_SHA}\`"
+            echo
+            echo "**Ref:** \`${GITHUB_REF}\`"
+            echo
+
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "### Result"
+              echo
+              echo "✅ CI completed successfully."
+            else
+              echo "### Result"
+              echo
+              echo "❌ CI did not complete successfully."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
