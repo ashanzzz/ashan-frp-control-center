@@ -43,7 +43,10 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
             "/api/v1/settings/providers",
             get(provider_settings).put(update_provider_settings),
         )
-        .route("/api/v1/settings/providers/test/chmlfrp", post(test_chmlfrp))
+        .route(
+            "/api/v1/settings/providers/test/chmlfrp",
+            post(test_chmlfrp),
+        )
         .route(
             "/api/v1/settings/providers/test/cloudflare",
             post(test_cloudflare),
