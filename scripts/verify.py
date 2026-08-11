@@ -59,13 +59,23 @@ if [p.name for p in workflows] != ["ci.yml"]:
 
 workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 for required in [
-    "cargo fmt --all",
+    "actions/checkout@v7",
+    "cargo fmt --all -- --check",
     "cargo test --workspace --locked",
     "cargo clippy --workspace --all-targets --locked -- -D warnings",
     "--target x86_64-unknown-linux-musl",
+    "docker/setup-buildx-action@v4",
+    "docker/login-action@v4",
+    "docker/build-push-action@v7",
 ]:
     if required not in workflow:
         errors.append(f"CI reproducibility command missing: {required}")
+
+
+if "cargo fmt --all\n" in workflow or "cargo generate-lockfile" in workflow:
+    errors.append("CI must validate committed sources/lockfile; it must not mutate them")
+if "git diff --exit-code" not in workflow:
+    errors.append("CI must verify that quality/build steps leave the checkout unchanged")
 
 cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
 if "apps/web" in cargo or (ROOT / "Dioxus.toml").exists():

@@ -32,6 +32,6 @@ The dashboard distinguishes a provider API outage from a missing resource. Fix C
 
 Deleting a plan is deliberately conservative. If the same ChmlFrp tunnel still exists, or a managed Cloudflare A record still exists, the API refuses to remove the local plan. Clean up the external resource first, then delete the plan. This keeps the local source of truth from losing ownership of an orphaned resource.
 
-## Dependency lock bootstrap
+## Dependency lock
 
-This application should commit `Cargo.lock`. The 0.2.0 refactor was produced in an environment without Cargo registry access, so the workflow generates one lockfile at the beginning of the quality job, uses `--locked` for every subsequent Rust build step, and uploads that exact lockfile as an artifact. After the first green 0.2.0 run, download `cargo-lock-<commit-sha>` and commit `Cargo.lock`; subsequent runs should keep the committed lockfile.
+`Cargo.lock` is committed and release builds use `--locked`. If a dependency update changes the lockfile, merge it only after the pull-request CI passes tests, strict Clippy and the release build.

@@ -1,13 +1,16 @@
 version: 2
+
 multi-ecosystem-groups:
   project-dependencies:
     schedule:
       interval: weekly
     labels:
       - dependencies
+
 updates:
   - package-ecosystem: cargo
     directory: "/"
+    versioning-strategy: lockfile-only
     patterns:
       - "*"
     multi-ecosystem-group: project-dependencies

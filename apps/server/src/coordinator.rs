@@ -1,5 +1,5 @@
 use crate::{reconcile, state::AppState};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ashan_frp_chmlfrp::RemoteTunnel;
 use ashan_frp_cloudflare::DnsRecord;
 use ashan_frp_domain::{FaultDomain, FrpcEvent, FrpcEventType, RoutingPhase, TunnelPlan};
@@ -7,8 +7,8 @@ use ashan_frp_failover::ordered_candidates;
 use ashan_frp_frpc_runtime::ReadinessError;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -172,7 +172,10 @@ impl Coordinator {
             .active_node
             .clone()
             .ok_or_else(|| anyhow!("no active node configured"))?;
-        self.state.db.set_routing_phase(RoutingPhase::Failover).await?;
+        self.state
+            .db
+            .set_routing_phase(RoutingPhase::Failover)
+            .await?;
 
         let reason = trigger
             .as_ref()
@@ -468,9 +471,9 @@ impl Coordinator {
         }
         let dns_required = plans.iter().any(|plan| plan.dns_managed);
         if dns_required && !self.state.cf.configured() {
-            return Err(
-                anyhow!("failover preflight failed: managed DNS exists but Cloudflare is not configured").into(),
-            );
+            return Err(anyhow!(
+                "failover preflight failed: managed DNS exists but Cloudflare is not configured"
+            ).into());
         }
         if dns_required {
             let records = self

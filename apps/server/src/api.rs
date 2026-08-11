@@ -33,10 +33,7 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
         )
         .route("/api/v1/routing", get(routing).put(update_routing))
         .route("/api/v1/nodes", get(nodes))
-        .route(
-            "/api/v1/nodes/{name}/unquarantine",
-            post(unquarantine_node),
-        )
+        .route("/api/v1/nodes/{name}/unquarantine", post(unquarantine_node))
         .route("/api/v1/reconcile", post(reconcile_all))
         .route("/api/v1/failover", post(manual_failover))
         .route("/api/v1/frpc/status", get(frpc_status))
@@ -377,15 +374,14 @@ async fn frpc_restart(State(state): State<ApiState>) -> ApiResult<serde_json::Va
 async fn events(
     State(state): State<ApiState>,
 ) -> Sse<impl Stream<Item = Result<axum::response::sse::Event, Infallible>>> {
-    let stream = BroadcastStream::new(state.app.frpc.subscribe()).filter_map(|result| match result {
-        Ok(event) => Some(Ok(
-            axum::response::sse::Event::default()
+    let stream =
+        BroadcastStream::new(state.app.frpc.subscribe()).filter_map(|result| match result {
+            Ok(event) => Some(Ok(axum::response::sse::Event::default()
                 .event("frpc")
                 .json_data(event)
-                .unwrap_or_else(|_| axum::response::sse::Event::default().data("{}")),
-        )),
-        Err(_) => None,
-    });
+                .unwrap_or_else(|_| axum::response::sse::Event::default().data("{}")))),
+            Err(_) => None,
+        });
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))

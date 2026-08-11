@@ -5,9 +5,8 @@ cd "$ROOT"
 
 python3 scripts/verify.py
 node --check web/assets/app.js
-cargo generate-lockfile
-cargo fmt --all
+cargo fmt --all -- --check
 cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --release --locked -p ashan-frp-server
 bash scripts/stage-release.sh

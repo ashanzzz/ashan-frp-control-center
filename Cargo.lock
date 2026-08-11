@@ -34,7 +34,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "ashan-frp-chmlfrp"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "ashan-frp-domain",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-cloudflare"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-database"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "ashan-frp-domain",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-domain"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "serde",
@@ -75,14 +75,14 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-failover"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "ashan-frp-domain",
 ]
 
 [[package]]
 name = "ashan-frp-frpc-log"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "ashan-frp-domain",
  "chrono",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-frpc-runtime"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "ashan-frp-domain",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-server"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "ashan-frp-chmlfrp",
