@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 - 2026-08-10
+
+- Move ChmlFrp and Cloudflare provider credentials into WebUI-managed SQLite settings under `/data`; Docker environment variables are now optional one-shot bootstrap seeds only, so a WebUI-cleared token cannot reappear after restart.
+- Hot-reconfigure both provider clients after a settings save, so token/base URL/Zone changes take effect without restarting the container.
+- Add read-only provider tests: ChmlFrp token/connectivity, Cloudflare token verification, accessible Zone discovery, and selected-zone A-record reads.
+- Never return saved provider token values through the settings API; expose only configured/not-configured booleans and explicit clear-token actions.
+- Block provider configuration writes while global reconcile/failover owns the coordinator operation lock.
+- Add a direct link to the official ChmlFrp panel/authorization flow while deliberately avoiding undocumented third-party OAuth client reuse.
+- Simplify the Unraid template: only WebUI Port and AppData are essential visible fields; provider/routing environment variables become optional advanced bootstrap settings.
+- Preserve the single global Active-node / GLOBAL_FAILOVER architecture and Cloudflare-last failover ordering.
+
 ## 0.2.2 - 2026-08-10
 
 - Make CI source-preserving: `cargo fmt --all -- --check`, strict Clippy, committed `Cargo.lock`, and a final clean-worktree assertion.

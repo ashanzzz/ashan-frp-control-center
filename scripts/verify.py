@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import tomllib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,11 @@ try:
         "INSERT INTO tunnel_plans(name,local_ip,local_port,protocol,domain,dns_managed) "
         "VALUES('tcp-b','127.0.0.1',10002,'tcp','',0)"
     )
+    provider_row = db.execute(
+        "SELECT singleton_id,chmlfrp_base_url,cloudflare_api_base FROM provider_settings"
+    ).fetchone()
+    if provider_row != (1, "https://cf-v2.uapis.cn", "https://api.cloudflare.com/client/v4"):
+        errors.append("provider_settings singleton/default API bases are invalid")
 finally:
     db.close()
 
@@ -77,7 +83,11 @@ if "cargo fmt --all\n" in workflow or "cargo generate-lockfile" in workflow:
 if "git diff --exit-code" not in workflow:
     errors.append("CI must verify that quality/build steps leave the checkout unchanged")
 
-cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+cargo_path = ROOT / "Cargo.toml"
+cargo = cargo_path.read_text(encoding="utf-8")
+workspace_version = tomllib.loads(cargo)["workspace"]["package"]["version"]
+if f"org.opencontainers.image.version={workspace_version}" not in workflow:
+    errors.append("CI OCI version label must match workspace package version")
 if "apps/web" in cargo or (ROOT / "Dioxus.toml").exists():
     errors.append("compiled Web/WASM frontend is forbidden; WebUI must be static Axum assets")
 if not (ROOT / "web" / "index.html").is_file() or not (ROOT / "web" / "assets" / "app.js").is_file():
@@ -86,6 +96,15 @@ if not (ROOT / "web" / "index.html").is_file() or not (ROOT / "web" / "assets" /
 web_js = (ROOT / "web" / "assets" / "app.js").read_text(encoding="utf-8")
 if web_js.count('api("/api/v1/failover", { method: "POST" })') != 1:
     errors.append("manual failover UI action must issue exactly one /api/v1/failover POST")
+for required in [
+    "/api/v1/settings/providers",
+    "/api/v1/settings/providers/test/chmlfrp",
+    "/api/v1/settings/providers/test/cloudflare",
+    "/api/v1/settings/providers/cloudflare/zones",
+    "https://panel.chmlfrp.net/",
+]:
+    if required not in web_js:
+        errors.append(f"WebUI provider setup marker missing: {required}")
 
 dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 if "cargo build" in dockerfile or "dx build" in dockerfile or "FROM rust:" in dockerfile:
@@ -106,8 +125,40 @@ if "MigrationError::TargetNode" not in rust:
     errors.append("typed target-node failover error missing")
 if "RoutingPhase::DegradedDns" not in rust or "RoutingPhase::Failed" not in rust:
     errors.append("typed routing recovery phases missing")
+for required in [
+    "ProviderSettingsView",
+    "ProviderSettingsUpdate",
+    "seed_provider_settings_from_env",
+    "env_bootstrap_complete",
+    "pub fn reconfigure",
+    "/user/tokens/verify",
+    "apply_provider_settings",
+]:
+    if required not in rust:
+        errors.append(f"runtime provider-settings marker missing: {required}")
+if "chmlfrp_token: String" in (ROOT / "crates" / "domain" / "src" / "lib.rs").read_text(encoding="utf-8"):
+    errors.append("ProviderSettingsView must never expose the stored ChmlFrp token")
+if "cloudflare_api_token: String" in (ROOT / "crates" / "domain" / "src" / "lib.rs").read_text(encoding="utf-8"):
+    errors.append("ProviderSettingsView must never expose the stored Cloudflare token")
+
 if "stop FRPC after confirmed active-node failure" not in rust:
     errors.append("automatic failover must stop the confirmed failed active FRPC runtime")
+
+try:
+    unraid_root = ET.parse(ROOT / "unraid" / "ashan-frp-control-center.xml").getroot()
+    configs = {node.attrib.get("Name"): node for node in unraid_root.findall("Config")}
+    if configs["ChmlFrp API Token"].attrib.get("Required") != "false":
+        errors.append("Unraid ChmlFrp token must not be required")
+    if configs["ChmlFrp API Token"].attrib.get("Display") != "advanced-hide":
+        errors.append("Unraid ChmlFrp token must be an advanced bootstrap option")
+    always = [
+        node.attrib.get("Name") for node in unraid_root.findall("Config")
+        if node.attrib.get("Display") == "always"
+    ]
+    if always != ["WebUI Port", "AppData (Cache)"]:
+        errors.append(f"Unraid essential visible fields drifted: {always}")
+except Exception as exc:
+    errors.append(f"Unraid template parse/validation failed: {exc}")
 
 if errors:
     print("VERIFY FAILED")

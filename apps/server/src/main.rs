@@ -38,14 +38,23 @@ async fn main() -> Result<()> {
         config.failover_enabled,
     )
     .await?;
+    db.seed_provider_settings_from_env(
+        &config.chmlfrp_base_url,
+        &config.chmlfrp_token,
+        &config.cloudflare_api_base,
+        &config.cloudflare_api_token,
+        &config.cloudflare_zone_id,
+    )
+    .await?;
+    let providers = db.provider_settings().await?;
 
     let state = Arc::new(AppState {
         db,
-        chml: ChmlFrpClient::new(&config.chmlfrp_base_url, &config.chmlfrp_token)?,
+        chml: ChmlFrpClient::new(&providers.chmlfrp_base_url, &providers.chmlfrp_token)?,
         cf: CloudflareClient::new(
-            &config.cloudflare_api_base,
-            &config.cloudflare_api_token,
-            &config.cloudflare_zone_id,
+            &providers.cloudflare_api_base,
+            &providers.cloudflare_api_token,
+            &providers.cloudflare_zone_id,
         )?,
         frpc: FrpcManager::new(
             &config.frpc_binary,

@@ -1,7 +1,13 @@
-use crate::{coordinator::Coordinator, reconcile, state::AppState};
+use crate::{
+    coordinator::{Coordinator, ProviderSettingsApplyError},
+    reconcile,
+    state::AppState,
+};
+use ashan_frp_chmlfrp::ChmlFrpClient;
+use ashan_frp_cloudflare::{CloudflareClient, CloudflareZone};
 use ashan_frp_domain::{
-    ApiResponse, DashboardSnapshot, ErrorResponse, ProviderHealth, RoutingUpdate, TunnelPlan,
-    TunnelPlanInput,
+    ApiResponse, DashboardSnapshot, ErrorResponse, ProviderHealth, ProviderSettingsUpdate,
+    ProviderSettingsView, RoutingUpdate, TunnelPlan, TunnelPlanInput,
 };
 use axum::{
     Json, Router,
@@ -11,6 +17,7 @@ use axum::{
     routing::{get, post, put},
 };
 use futures_util::Stream;
+use serde::Deserialize;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
@@ -32,6 +39,19 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
             put(update_tunnel).delete(delete_tunnel),
         )
         .route("/api/v1/routing", get(routing).put(update_routing))
+        .route(
+            "/api/v1/settings/providers",
+            get(provider_settings).put(update_provider_settings),
+        )
+        .route("/api/v1/settings/providers/test/chmlfrp", post(test_chmlfrp))
+        .route(
+            "/api/v1/settings/providers/test/cloudflare",
+            post(test_cloudflare),
+        )
+        .route(
+            "/api/v1/settings/providers/cloudflare/zones",
+            post(cloudflare_zones),
+        )
         .route("/api/v1/nodes", get(nodes))
         .route("/api/v1/nodes/{name}/unquarantine", post(unquarantine_node))
         .route("/api/v1/reconcile", post(reconcile_all))
@@ -255,6 +275,155 @@ fn validate_tunnel(input: &TunnelPlanInput) -> Result<(), ApiError> {
         return Err(ApiError::bad_request(
             "domain is required when Cloudflare DNS is managed",
         ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct ProviderProbeInput {
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    zone_id: Option<String>,
+}
+
+async fn provider_settings(State(state): State<ApiState>) -> ApiResult<ProviderSettingsView> {
+    Ok(Json(ApiResponse {
+        data: state.app.db.provider_settings().await?.view(),
+    }))
+}
+
+async fn update_provider_settings(
+    State(state): State<ApiState>,
+    Json(input): Json<ProviderSettingsUpdate>,
+) -> ApiResult<ProviderSettingsView> {
+    validate_api_base("ChmlFrp API Base", &input.chmlfrp_base_url)?;
+    validate_api_base("Cloudflare API Base", &input.cloudflare_api_base)?;
+    let view = match state.coordinator.apply_provider_settings(&input).await {
+        Ok(view) => view,
+        Err(ProviderSettingsApplyError::Busy) => {
+            return Err(ApiError::conflict(
+                "全局同步/故障切换正在运行，请在操作结束后再修改 Provider 配置",
+            ));
+        }
+        Err(ProviderSettingsApplyError::Other(error)) => return Err(ApiError::from(error)),
+    };
+    Ok(Json(ApiResponse { data: view }))
+}
+
+async fn test_chmlfrp(
+    State(state): State<ApiState>,
+    Json(input): Json<ProviderProbeInput>,
+) -> ApiResult<serde_json::Value> {
+    let saved = state.app.db.provider_settings().await?;
+    let base_url = candidate_value(input.base_url.as_deref(), &saved.chmlfrp_base_url);
+    let token = candidate_value(input.token.as_deref(), &saved.chmlfrp_token);
+    validate_api_base("ChmlFrp API Base", &base_url)?;
+    if token.is_empty() {
+        return Err(ApiError::bad_request("请输入 ChmlFrp API Token"));
+    }
+
+    let client = ChmlFrpClient::new(&base_url, &token)?;
+    let tunnels = client.list_tunnels().await?;
+    Ok(Json(ApiResponse {
+        data: serde_json::json!({
+            "ok": true,
+            "message": "ChmlFrp API 连接成功，Token 有效",
+            "tunnels": tunnels.len(),
+        }),
+    }))
+}
+
+async fn test_cloudflare(
+    State(state): State<ApiState>,
+    Json(input): Json<ProviderProbeInput>,
+) -> ApiResult<serde_json::Value> {
+    let saved = state.app.db.provider_settings().await?;
+    let base_url = candidate_value(input.base_url.as_deref(), &saved.cloudflare_api_base);
+    let token = candidate_value(input.token.as_deref(), &saved.cloudflare_api_token);
+    let zone_id = candidate_value(input.zone_id.as_deref(), &saved.cloudflare_zone_id);
+    validate_api_base("Cloudflare API Base", &base_url)?;
+    if token.is_empty() {
+        return Err(ApiError::bad_request("请输入 Cloudflare API Token"));
+    }
+
+    let client = CloudflareClient::new(&base_url, &token, &zone_id)?;
+    let token_status = client.verify_token().await?;
+    if zone_id.is_empty() {
+        let zones = client.list_zones().await?;
+        return Ok(Json(ApiResponse {
+            data: serde_json::json!({
+                "ok": true,
+                "message": "Cloudflare Token 有效；请选择 Zone 后再测试 DNS 读取",
+                "token_status": token_status,
+                "zones": zones.len(),
+                "dns_read_tested": false,
+            }),
+        }));
+    }
+
+    let records = client.list_a_records().await?;
+    Ok(Json(ApiResponse {
+        data: serde_json::json!({
+            "ok": true,
+            "message": "Cloudflare Token 与 Zone 读取测试成功",
+            "token_status": token_status,
+            "a_records": records.len(),
+            "dns_read_tested": true,
+            "dns_write_tested": false,
+        }),
+    }))
+}
+
+async fn cloudflare_zones(
+    State(state): State<ApiState>,
+    Json(input): Json<ProviderProbeInput>,
+) -> ApiResult<Vec<CloudflareZone>> {
+    let saved = state.app.db.provider_settings().await?;
+    let base_url = candidate_value(input.base_url.as_deref(), &saved.cloudflare_api_base);
+    let token = candidate_value(input.token.as_deref(), &saved.cloudflare_api_token);
+    validate_api_base("Cloudflare API Base", &base_url)?;
+    if token.is_empty() {
+        return Err(ApiError::bad_request("请输入 Cloudflare API Token"));
+    }
+
+    let client = CloudflareClient::new(&base_url, &token, "")?;
+    client.verify_token().await?;
+    let mut zones = client.list_zones().await?;
+    zones.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Json(ApiResponse { data: zones }))
+}
+
+fn candidate_value(candidate: Option<&str>, current: &str) -> String {
+    candidate
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(current)
+        .trim()
+        .to_owned()
+}
+
+fn validate_api_base(label: &str, value: &str) -> Result<(), ApiError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ApiError::bad_request(format!("{label} 不能为空")));
+    }
+    let secure = value.starts_with("https://");
+    let loopback = value == "http://127.0.0.1"
+        || value.starts_with("http://127.0.0.1:")
+        || value.starts_with("http://127.0.0.1/")
+        || value == "http://localhost"
+        || value.starts_with("http://localhost:")
+        || value.starts_with("http://localhost/")
+        || value == "http://[::1]"
+        || value.starts_with("http://[::1]:")
+        || value.starts_with("http://[::1]/");
+    if !secure && !loopback {
+        return Err(ApiError::bad_request(format!(
+            "{label} 必须使用 https://；仅本机回环地址允许 http://"
+        )));
     }
     Ok(())
 }

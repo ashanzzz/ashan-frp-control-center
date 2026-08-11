@@ -2,16 +2,24 @@ use anyhow::{Context, Result, anyhow};
 use ashan_frp_domain::{NodeSummary, TunnelPlan};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Debug, Clone)]
+struct ChmlFrpConfig {
+    base_url: String,
+    token: String,
+}
+
 #[derive(Clone)]
 pub struct ChmlFrpClient {
     http: Client,
-    base_url: String,
-    token: String,
+    config: Arc<RwLock<ChmlFrpConfig>>,
 }
 
 impl ChmlFrpClient {
@@ -24,21 +32,39 @@ impl ChmlFrpClient {
 
         Ok(Self {
             http,
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
-            token: token.into(),
+            config: Arc::new(RwLock::new(ChmlFrpConfig {
+                base_url: normalize_base_url(base_url.into()),
+                token: token.into(),
+            })),
         })
     }
 
+    fn snapshot(&self) -> ChmlFrpConfig {
+        self.config
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn reconfigure(&self, base_url: impl Into<String>, token: impl Into<String>) {
+        let mut config = self
+            .config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        config.base_url = normalize_base_url(base_url.into());
+        config.token = token.into();
+    }
+
     pub fn configured(&self) -> bool {
-        !self.token.trim().is_empty()
+        !self.snapshot().token.trim().is_empty()
     }
 
     pub async fn list_tunnels(&self) -> Result<Vec<RemoteTunnel>> {
-        self.require_token()?;
+        let config = self.require_token()?;
         let response: Envelope<Vec<RemoteTunnel>> = self
             .http
-            .get(format!("{}/tunnel", self.base_url))
-            .query(&[("token", self.token.as_str())])
+            .get(format!("{}/tunnel", config.base_url))
+            .query(&[("token", config.token.as_str())])
             .send()
             .await
             .context("list ChmlFrp tunnels")?
@@ -52,9 +78,10 @@ impl ChmlFrpClient {
     }
 
     pub async fn list_nodes(&self) -> Result<Vec<NodeSummary>> {
+        let config = self.snapshot();
         let response: Envelope<Vec<NodeListItem>> = self
             .http
-            .get(format!("{}/node", self.base_url))
+            .get(format!("{}/node", config.base_url))
             .send()
             .await
             .context("list ChmlFrp nodes")?
@@ -111,11 +138,11 @@ impl ChmlFrpClient {
     }
 
     pub async fn node_info(&self, node: &str) -> Result<NodeInfo> {
-        self.require_token()?;
+        let config = self.require_token()?;
         let response: Envelope<NodeInfo> = self
             .http
-            .get(format!("{}/nodeinfo", self.base_url))
-            .query(&[("token", self.token.as_str()), ("node", node)])
+            .get(format!("{}/nodeinfo", config.base_url))
+            .query(&[("token", config.token.as_str()), ("node", node)])
             .send()
             .await
             .with_context(|| format!("read ChmlFrp node {node}"))?
@@ -135,11 +162,11 @@ impl ChmlFrpClient {
         plan: &TunnelPlan,
         target_node: &str,
     ) -> Result<RemoteTunnel> {
-        self.require_token()?;
-        let payload = TunnelMutation::from_plan(&self.token, plan, target_node, 0);
+        let config = self.require_token()?;
+        let payload = TunnelMutation::from_plan(&config.token, plan, target_node, 0);
         let response: Envelope<RemoteTunnel> = self
             .http
-            .post(format!("{}/create_tunnel", self.base_url))
+            .post(format!("{}/create_tunnel", config.base_url))
             .json(&payload)
             .send()
             .await
@@ -164,13 +191,13 @@ impl ChmlFrpClient {
         plan: &TunnelPlan,
         target_node: &str,
     ) -> Result<()> {
-        self.require_token()?;
+        let config = self.require_token()?;
         let is_web = matches!(
             plan.protocol.to_ascii_lowercase().as_str(),
             "http" | "https"
         );
         let payload = TunnelMutation {
-            token: self.token.clone(),
+            token: config.token.clone(),
             tunnelname: plan.name.clone(),
             node: target_node.to_owned(),
             porttype: plan.protocol.to_ascii_lowercase(),
@@ -192,7 +219,7 @@ impl ChmlFrpClient {
         };
         let response: Envelope<serde_json::Value> = self
             .http
-            .post(format!("{}/update_tunnel", self.base_url))
+            .post(format!("{}/update_tunnel", config.base_url))
             .form(&payload)
             .send()
             .await
@@ -207,13 +234,13 @@ impl ChmlFrpClient {
     }
 
     pub async fn generated_config(&self, node: &str, tunnel_names: &[String]) -> Result<String> {
-        self.require_token()?;
+        let config = self.require_token()?;
         let names = tunnel_names.join(",");
         let response: Envelope<String> = self
             .http
-            .get(format!("{}/tunnel_config", self.base_url))
+            .get(format!("{}/tunnel_config", config.base_url))
             .query(&[
-                ("token", self.token.as_str()),
+                ("token", config.token.as_str()),
                 ("node", node),
                 ("tunnel_names", names.as_str()),
             ])
@@ -232,17 +259,21 @@ impl ChmlFrpClient {
     }
 
     pub async fn health(&self) -> Result<()> {
-        self.require_token()?;
         self.list_tunnels().await.map(|_| ())
     }
 
-    fn require_token(&self) -> Result<()> {
-        if self.configured() {
-            Ok(())
+    fn require_token(&self) -> Result<ChmlFrpConfig> {
+        let config = self.snapshot();
+        if !config.token.trim().is_empty() {
+            Ok(config)
         } else {
-            Err(anyhow!("CHMLFRP_TOKEN is not configured"))
+            Err(anyhow!("ChmlFrp token is not configured"))
         }
     }
+}
+
+fn normalize_base_url(value: String) -> String {
+    value.trim().trim_end_matches('/').to_owned()
 }
 
 fn nonempty(value: String) -> Option<String> {

@@ -217,6 +217,31 @@ pub struct ProviderHealth {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderSettingsView {
+    pub chmlfrp_base_url: String,
+    pub chmlfrp_token_configured: bool,
+    pub cloudflare_api_base: String,
+    pub cloudflare_api_token_configured: bool,
+    pub cloudflare_zone_id: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderSettingsUpdate {
+    pub chmlfrp_base_url: String,
+    #[serde(default)]
+    pub chmlfrp_token: Option<String>,
+    #[serde(default)]
+    pub clear_chmlfrp_token: bool,
+    pub cloudflare_api_base: String,
+    #[serde(default)]
+    pub cloudflare_api_token: Option<String>,
+    #[serde(default)]
+    pub clear_cloudflare_api_token: bool,
+    pub cloudflare_zone_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ActivityEvent {
     pub id: i64,
     pub job_id: Option<String>,

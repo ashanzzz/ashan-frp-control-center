@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use ashan_frp_domain::{
-    ActivityEvent, RoutingPhase, RoutingState, RoutingUpdate, TunnelPlan, TunnelPlanInput,
+    ActivityEvent, ProviderSettingsUpdate, ProviderSettingsView, RoutingPhase, RoutingState,
+    RoutingUpdate, TunnelPlan, TunnelPlanInput,
 };
 use chrono::{Duration, Utc};
 use serde_json::Value;
@@ -13,6 +14,29 @@ use std::{str::FromStr, time::Duration as StdDuration};
 #[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderSettings {
+    pub chmlfrp_base_url: String,
+    pub chmlfrp_token: String,
+    pub cloudflare_api_base: String,
+    pub cloudflare_api_token: String,
+    pub cloudflare_zone_id: String,
+    pub updated_at: String,
+}
+
+impl ProviderSettings {
+    pub fn view(&self) -> ProviderSettingsView {
+        ProviderSettingsView {
+            chmlfrp_base_url: self.chmlfrp_base_url.clone(),
+            chmlfrp_token_configured: !self.chmlfrp_token.trim().is_empty(),
+            cloudflare_api_base: self.cloudflare_api_base.clone(),
+            cloudflare_api_token_configured: !self.cloudflare_api_token.trim().is_empty(),
+            cloudflare_zone_id: self.cloudflare_zone_id.clone(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
 }
 
 impl Database {
@@ -47,6 +71,102 @@ impl Database {
     pub async fn ping(&self) -> Result<()> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
+    }
+
+    pub async fn provider_settings(&self) -> Result<ProviderSettings> {
+        let row = sqlx::query(
+            "SELECT chmlfrp_base_url,chmlfrp_token,cloudflare_api_base,cloudflare_api_token,\
+             cloudflare_zone_id,updated_at FROM provider_settings WHERE singleton_id=1",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(ProviderSettings {
+            chmlfrp_base_url: row.get("chmlfrp_base_url"),
+            chmlfrp_token: row.get("chmlfrp_token"),
+            cloudflare_api_base: row.get("cloudflare_api_base"),
+            cloudflare_api_token: row.get("cloudflare_api_token"),
+            cloudflare_zone_id: row.get("cloudflare_zone_id"),
+            updated_at: row.get("updated_at"),
+        })
+    }
+
+    /// Environment variables are a one-shot compatibility bootstrap only.
+    /// After the first v0.3+ startup, WebUI/SQLite is the source of truth, so
+    /// explicitly clearing a token cannot be undone by a stale Docker variable.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn seed_provider_settings_from_env(
+        &self,
+        chmlfrp_base_url: &str,
+        chmlfrp_token: &str,
+        cloudflare_api_base: &str,
+        cloudflare_api_token: &str,
+        cloudflare_zone_id: &str,
+    ) -> Result<()> {
+        let bootstrap_complete: i64 = sqlx::query_scalar(
+            "SELECT env_bootstrap_complete FROM provider_settings WHERE singleton_id=1",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        if bootstrap_complete != 0 {
+            return Ok(());
+        }
+
+        sqlx::query(
+            "UPDATE provider_settings SET chmlfrp_base_url=?,chmlfrp_token=?,\
+             cloudflare_api_base=?,cloudflare_api_token=?,cloudflare_zone_id=?,\
+             env_bootstrap_complete=1,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
+        )
+        .bind(chmlfrp_base_url.trim().trim_end_matches('/'))
+        .bind(chmlfrp_token.trim())
+        .bind(cloudflare_api_base.trim().trim_end_matches('/'))
+        .bind(cloudflare_api_token.trim())
+        .bind(cloudflare_zone_id.trim())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_provider_settings(
+        &self,
+        input: &ProviderSettingsUpdate,
+    ) -> Result<ProviderSettings> {
+        let current = self.provider_settings().await?;
+        let chmlfrp_token = if input.clear_chmlfrp_token {
+            String::new()
+        } else {
+            input
+                .chmlfrp_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or(current.chmlfrp_token)
+        };
+        let cloudflare_api_token = if input.clear_cloudflare_api_token {
+            String::new()
+        } else {
+            input
+                .cloudflare_api_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or(current.cloudflare_api_token)
+        };
+
+        sqlx::query(
+            "UPDATE provider_settings SET chmlfrp_base_url=?,chmlfrp_token=?,\
+             cloudflare_api_base=?,cloudflare_api_token=?,cloudflare_zone_id=?,\
+             env_bootstrap_complete=1,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
+        )
+        .bind(input.chmlfrp_base_url.trim().trim_end_matches('/'))
+        .bind(chmlfrp_token)
+        .bind(input.cloudflare_api_base.trim().trim_end_matches('/'))
+        .bind(cloudflare_api_token)
+        .bind(input.cloudflare_zone_id.trim())
+        .execute(&self.pool)
+        .await?;
+        self.provider_settings().await
     }
 
     pub async fn seed_routing_from_env(

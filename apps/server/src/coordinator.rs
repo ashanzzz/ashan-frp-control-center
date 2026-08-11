@@ -2,7 +2,10 @@ use crate::{reconcile, state::AppState};
 use anyhow::{Context, Result, anyhow};
 use ashan_frp_chmlfrp::RemoteTunnel;
 use ashan_frp_cloudflare::DnsRecord;
-use ashan_frp_domain::{FaultDomain, FrpcEvent, FrpcEventType, RoutingPhase, TunnelPlan};
+use ashan_frp_domain::{
+    FaultDomain, FrpcEvent, FrpcEventType, ProviderSettingsUpdate, ProviderSettingsView,
+    RoutingPhase, TunnelPlan,
+};
 use ashan_frp_failover::ordered_candidates;
 use ashan_frp_frpc_runtime::ReadinessError;
 use sha2::{Digest, Sha256};
@@ -20,6 +23,14 @@ enum MigrationError {
     Other(#[from] anyhow::Error),
 }
 
+#[derive(Debug, Error)]
+pub enum ProviderSettingsApplyError {
+    #[error("global operation already running")]
+    Busy,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 #[derive(Clone)]
 pub struct Coordinator {
     state: Arc<AppState>,
@@ -32,6 +43,45 @@ impl Coordinator {
             state,
             lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub async fn apply_provider_settings(
+        &self,
+        input: &ProviderSettingsUpdate,
+    ) -> std::result::Result<ProviderSettingsView, ProviderSettingsApplyError> {
+        let _guard = self
+            .lock
+            .try_lock()
+            .map_err(|_| ProviderSettingsApplyError::Busy)?;
+        let saved = self.state.db.update_provider_settings(input).await?;
+        self.state
+            .chml
+            .reconfigure(&saved.chmlfrp_base_url, &saved.chmlfrp_token);
+        self.state.cf.reconfigure(
+            &saved.cloudflare_api_base,
+            &saved.cloudflare_api_token,
+            &saved.cloudflare_zone_id,
+        );
+        let view = saved.view();
+        self.state
+            .db
+            .activity(
+                None,
+                "provider_settings",
+                "info",
+                "Provider 配置已从 WebUI 更新并立即生效",
+                None,
+                None,
+                serde_json::json!({
+                    "chmlfrp_base_url": view.chmlfrp_base_url.clone(),
+                    "chmlfrp_token_configured": view.chmlfrp_token_configured,
+                    "cloudflare_api_base": view.cloudflare_api_base.clone(),
+                    "cloudflare_api_token_configured": view.cloudflare_api_token_configured,
+                    "cloudflare_zone_id": view.cloudflare_zone_id.clone(),
+                }),
+            )
+            .await?;
+        Ok(view)
     }
 
     pub fn spawn_frpc_fault_watcher(&self) {

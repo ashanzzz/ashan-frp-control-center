@@ -3,6 +3,8 @@ const state = {
   dashboard: null,
   nodes: [],
   logs: [],
+  providerSettings: null,
+  cloudflareZones: [],
   busy: false,
   refreshing: false,
 };
@@ -13,7 +15,7 @@ const pageMeta = {
   dns: ["Cloudflare DNS", "受管 A 记录只在新 FRPC 链路验证后切换"],
   frpc: ["FRPC Runtime", "ChmlFrp 生成配置；FRPC 负责运行、日志与故障信号"],
   activity: ["活动", "全局同步、故障切换、回滚与 DNS 操作审计"],
-  settings: ["设置", "全局路由策略；不存在单隧道节点设置"],
+  settings: ["设置", "Provider 连接与全局路由策略；Token 可在 WebUI 保存并立即生效"],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -140,9 +142,79 @@ function renderActivity() {
 
 function renderSettings() {
   const r = state.dashboard.routing;
-  const options = (selected) => `<option value="">未配置</option>${state.nodes.map((node) => `<option value="${esc(node.name)}" ${node.name === selected ? "selected" : ""}>${esc(node.name)} · ${esc(node.area)}</option>`).join("")}`;
+  const p = state.providerSettings;
+  if (!p) return `<p class="muted">正在读取 Provider 设置…</p>`;
+
+  const nodeOptions = (selected) => `<option value="">未配置</option>${state.nodes.map((node) => `<option value="${esc(node.name)}" ${node.name === selected ? "selected" : ""}>${esc(node.name)} · ${esc(node.area)}</option>`).join("")}`;
   const activeLocked = r.active_node ? "disabled" : "";
-  return `<h2>全局路由策略</h2><p>已有活动节点后，不能在设置中直接换 Active；必须使用 GLOBAL FAILOVER，确保全部隧道一起迁移。</p><form id="routing-form"><label>活动节点<select id="routing-active" ${activeLocked}>${options(r.active_node)}</select></label><label>备用节点<select id="routing-standby">${options(r.standby_node)}</select></label><label>故障节点隔离天数<input id="routing-days" type="number" min="1" max="3650" value="${esc(r.quarantine_days)}"></label><label class="check"><input id="routing-enabled" type="checkbox" ${r.failover_enabled ? "checked" : ""}> 启用 FRPC 日志驱动的自动全局切换</label><div class="actions"><button type="submit">保存设置</button></div></form>`;
+  const chmlStatus = state.dashboard.chmlfrp_health;
+  const cfStatus = state.dashboard.cloudflare_health;
+  const zoneOptions = cloudflareZoneOptions(p.cloudflare_zone_id);
+
+  return `<div class="settings-stack">
+    <section class="settings-card">
+      <div class="settings-card-head">
+        <div><h2>ChmlFrp 连接</h2><p>Token 保存到本机 /data SQLite，保存后立即热更新，不需要重启 Docker。</p></div>
+        <span class="badge ${chmlStatus.connected ? "ok" : (p.chmlfrp_token_configured ? "bad" : "")}">${p.chmlfrp_token_configured ? (chmlStatus.connected ? "Connected" : "Configured") : "未配置"}</span>
+      </div>
+      <label>API Base URL<input id="chml-base" value="${esc(p.chmlfrp_base_url)}" autocomplete="off" spellcheck="false"></label>
+      <label>API Token<input id="chml-token" type="password" autocomplete="new-password" placeholder="${p.chmlfrp_token_configured ? "已保存；留空保持当前 Token" : "粘贴 ChmlFrp API Token"}"></label>
+      <div id="chml-test-result" class="provider-result muted">${esc(chmlStatus.message || "尚未测试")}</div>
+      <div class="provider-actions">
+        <button type="button" id="chml-test">测试连接</button>
+        <button type="button" id="chml-save">保存并立即生效</button>
+        ${p.chmlfrp_token_configured ? `<button type="button" id="chml-clear" class="danger">清除 Token</button>` : ""}
+        <a class="button-link" href="https://panel.chmlfrp.net/" target="_blank" rel="noopener noreferrer">打开 ChmlFrp 官方面板 / 授权</a>
+      </div>
+      <p class="provider-note">ChmlFrp 官方客户端存在浏览器授权登录流程，但目前没有找到面向第三方自托管应用公开的 OAuth Client 注册与回调规范。本控制器不会冒用 ChmlFrp 自己的 client_id；现阶段通过官方面板获取/管理 Token 最稳妥。</p>
+    </section>
+
+    <section class="settings-card">
+      <div class="settings-card-head">
+        <div><h2>Cloudflare</h2><p>可先验证 Token，再自动读取可访问的 Zone；测试只读取，不写 DNS。</p></div>
+        <span class="badge ${cfStatus.connected ? "ok" : (p.cloudflare_api_token_configured ? "bad" : "")}">${p.cloudflare_api_token_configured ? (cfStatus.connected ? "Connected" : "Configured") : "未配置"}</span>
+      </div>
+      <label>API Base URL<input id="cf-base" value="${esc(p.cloudflare_api_base)}" autocomplete="off" spellcheck="false"></label>
+      <label>API Token<input id="cf-token" type="password" autocomplete="new-password" placeholder="${p.cloudflare_api_token_configured ? "已保存；留空保持当前 Token" : "粘贴 Cloudflare scoped API Token"}"></label>
+      <div class="form-grid provider-zone-grid">
+        <label>Zone<select id="cf-zone-list">${zoneOptions}</select></label>
+        <label>Zone ID<input id="cf-zone" value="${esc(p.cloudflare_zone_id)}" placeholder="可读取 Zone 自动填入，也可手动输入" autocomplete="off"></label>
+      </div>
+      <div id="cf-test-result" class="provider-result muted">${esc(cfStatus.message || "尚未测试")}</div>
+      <div class="provider-actions">
+        <button type="button" id="cf-zones">验证 Token / 读取 Zone</button>
+        <button type="button" id="cf-test">测试 Token + Zone</button>
+        <button type="button" id="cf-save">保存并立即生效</button>
+        ${p.cloudflare_api_token_configured ? `<button type="button" id="cf-clear" class="danger">清除 Token</button>` : ""}
+      </div>
+      <p class="provider-note">推荐 Token 权限至少包含 Zone Read 与受管 Zone 的 DNS Edit。这里的“测试”不会创建、修改或删除 DNS，因此不会用写操作探测 DNS Edit 权限。</p>
+    </section>
+
+    <section class="settings-card">
+      <div class="settings-card-head"><div><h2>全局路由策略</h2><p>已有活动节点后不能直接改 Active；必须使用 GLOBAL FAILOVER，让全部隧道作为一个整体迁移。</p></div></div>
+      <form id="routing-form">
+        <div class="form-grid">
+          <label>活动节点<select id="routing-active" ${activeLocked}>${nodeOptions(r.active_node)}</select></label>
+          <label>备用节点<select id="routing-standby">${nodeOptions(r.standby_node)}</select></label>
+        </div>
+        <label>故障节点隔离天数<input id="routing-days" type="number" min="1" max="3650" value="${esc(r.quarantine_days)}"></label>
+        <label class="check compact-check"><input id="routing-enabled" type="checkbox" ${r.failover_enabled ? "checked" : ""}> 启用 FRPC 日志驱动的自动全局切换</label>
+        <div class="actions"><button type="submit">保存路由策略</button></div>
+      </form>
+    </section>
+  </div>`;
+}
+
+function cloudflareZoneOptions(currentZoneId = "") {
+  const options = [`<option value="">${state.cloudflareZones.length ? "请选择 Zone" : "读取 Zone 后可选择"}</option>`];
+  const currentKnown = state.cloudflareZones.some((zone) => zone.id === currentZoneId);
+  if (currentZoneId && !currentKnown) {
+    options.push(`<option value="${esc(currentZoneId)}" selected>当前 / 手动 Zone · ${esc(currentZoneId)}</option>`);
+  }
+  for (const zone of state.cloudflareZones) {
+    options.push(`<option value="${esc(zone.id)}" ${zone.id === currentZoneId ? "selected" : ""}>${esc(zone.name)} · ${esc(zone.status || "unknown")}</option>`);
+  }
+  return options.join("");
 }
 
 function render() {
@@ -160,6 +232,15 @@ function render() {
 
 async function loadNodes() {
   try { state.nodes = await api("/api/v1/nodes"); } catch { state.nodes = []; }
+}
+
+async function loadProviderSettings() {
+  try {
+    state.providerSettings = await api("/api/v1/settings/providers");
+  } catch (error) {
+    state.providerSettings = null;
+    setAlert(`读取 Provider 设置失败：${error.message}`);
+  }
 }
 
 async function loadLogs() {
@@ -218,6 +299,149 @@ function bindPageActions() {
     try { await api(`/api/v1/frpc/${button.dataset.frpc}`, { method: "POST" }); await refresh(); await loadLogs(); } catch (error) { setAlert(error.message); }
   }));
   $("#routing-form")?.addEventListener("submit", saveRouting);
+  $("#chml-test")?.addEventListener("click", testChmlFrp);
+  $("#chml-save")?.addEventListener("click", saveChmlFrpSettings);
+  $("#chml-clear")?.addEventListener("click", clearChmlFrpToken);
+  $("#cf-zones")?.addEventListener("click", loadCloudflareZones);
+  $("#cf-test")?.addEventListener("click", testCloudflare);
+  $("#cf-save")?.addEventListener("click", saveCloudflareSettings);
+  $("#cf-clear")?.addEventListener("click", clearCloudflareToken);
+  $("#cf-zone-list")?.addEventListener("change", (event) => {
+    if (event.target.value) $("#cf-zone").value = event.target.value;
+  });
+}
+
+function providerResult(selector, message, ok = true) {
+  const element = $(selector);
+  if (!element) return;
+  element.textContent = message;
+  element.classList.remove("muted", "provider-ok", "provider-bad");
+  element.classList.add(ok ? "provider-ok" : "provider-bad");
+}
+
+function chmlProbeBody() {
+  return {
+    base_url: $("#chml-base")?.value.trim() || state.providerSettings.chmlfrp_base_url,
+    token: $("#chml-token")?.value.trim() || null,
+  };
+}
+
+function cloudflareProbeBody() {
+  return {
+    base_url: $("#cf-base")?.value.trim() || state.providerSettings.cloudflare_api_base,
+    token: $("#cf-token")?.value.trim() || null,
+    zone_id: $("#cf-zone")?.value.trim() || null,
+  };
+}
+
+async function testChmlFrp() {
+  try {
+    providerResult("#chml-test-result", "正在测试…", true);
+    const result = await api("/api/v1/settings/providers/test/chmlfrp", { method: "POST", body: JSON.stringify(chmlProbeBody()) });
+    providerResult("#chml-test-result", `${result.message} · ${result.tunnels} 条隧道`, true);
+  } catch (error) {
+    providerResult("#chml-test-result", error.message, false);
+  }
+}
+
+async function saveChmlFrpSettings() {
+  const p = state.providerSettings;
+  const body = {
+    chmlfrp_base_url: $("#chml-base").value.trim(),
+    chmlfrp_token: $("#chml-token").value.trim() || null,
+    clear_chmlfrp_token: false,
+    cloudflare_api_base: p.cloudflare_api_base,
+    cloudflare_api_token: null,
+    clear_cloudflare_api_token: false,
+    cloudflare_zone_id: p.cloudflare_zone_id,
+  };
+  await saveProviderSettings(body, "ChmlFrp 配置已保存并立即生效");
+}
+
+async function clearChmlFrpToken() {
+  if (!(await confirmAction("清除 ChmlFrp Token", "清除后 ChmlFrp 管理、节点详情、同步和故障切换将不可用，直到重新配置 Token。继续？"))) return;
+  const p = state.providerSettings;
+  const body = {
+    chmlfrp_base_url: $("#chml-base").value.trim(),
+    chmlfrp_token: null,
+    clear_chmlfrp_token: true,
+    cloudflare_api_base: p.cloudflare_api_base,
+    cloudflare_api_token: null,
+    clear_cloudflare_api_token: false,
+    cloudflare_zone_id: p.cloudflare_zone_id,
+  };
+  await saveProviderSettings(body, "ChmlFrp Token 已清除");
+}
+
+async function loadCloudflareZones() {
+  try {
+    providerResult("#cf-test-result", "正在验证 Token 并读取 Zone…", true);
+    const zones = await api("/api/v1/settings/providers/cloudflare/zones", { method: "POST", body: JSON.stringify(cloudflareProbeBody()) });
+    state.cloudflareZones = zones;
+    const select = $("#cf-zone-list");
+    const current = $("#cf-zone").value.trim() || state.providerSettings.cloudflare_zone_id;
+    select.innerHTML = cloudflareZoneOptions(current);
+    if (!current && zones.length === 1) {
+      select.value = zones[0].id;
+      $("#cf-zone").value = zones[0].id;
+    }
+    providerResult("#cf-test-result", `Token 有效，读取到 ${zones.length} 个可访问 Zone`, true);
+  } catch (error) {
+    providerResult("#cf-test-result", error.message, false);
+  }
+}
+
+async function testCloudflare() {
+  try {
+    providerResult("#cf-test-result", "正在测试…", true);
+    const result = await api("/api/v1/settings/providers/test/cloudflare", { method: "POST", body: JSON.stringify(cloudflareProbeBody()) });
+    const detail = result.dns_read_tested ? ` · 读取到 ${result.a_records} 条 A 记录` : "";
+    providerResult("#cf-test-result", `${result.message}${detail}`, true);
+  } catch (error) {
+    providerResult("#cf-test-result", error.message, false);
+  }
+}
+
+async function saveCloudflareSettings() {
+  const p = state.providerSettings;
+  const body = {
+    chmlfrp_base_url: p.chmlfrp_base_url,
+    chmlfrp_token: null,
+    clear_chmlfrp_token: false,
+    cloudflare_api_base: $("#cf-base").value.trim(),
+    cloudflare_api_token: $("#cf-token").value.trim() || null,
+    clear_cloudflare_api_token: false,
+    cloudflare_zone_id: $("#cf-zone").value.trim(),
+  };
+  await saveProviderSettings(body, "Cloudflare 配置已保存并立即生效");
+}
+
+async function clearCloudflareToken() {
+  if (!(await confirmAction("清除 Cloudflare Token", "清除后受管 DNS 不会自动切换，直到重新配置 Cloudflare。继续？"))) return;
+  const p = state.providerSettings;
+  const body = {
+    chmlfrp_base_url: p.chmlfrp_base_url,
+    chmlfrp_token: null,
+    clear_chmlfrp_token: false,
+    cloudflare_api_base: $("#cf-base").value.trim(),
+    cloudflare_api_token: null,
+    clear_cloudflare_api_token: true,
+    cloudflare_zone_id: $("#cf-zone").value.trim(),
+  };
+  await saveProviderSettings(body, "Cloudflare Token 已清除");
+}
+
+async function saveProviderSettings(body, successMessage) {
+  try {
+    state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });
+    state.cloudflareZones = [];
+    await loadNodes();
+    await refresh();
+    setAlert(successMessage, "info");
+    if (state.page === "settings") render();
+  } catch (error) {
+    setAlert(error.message);
+  }
 }
 
 async function saveRouting(event) {
@@ -244,6 +468,7 @@ $("#dialog-cancel").addEventListener("click", () => $("#tunnel-dialog").close())
 document.querySelectorAll("#nav button").forEach((button) => button.addEventListener("click", async () => {
   state.page = button.dataset.page;
   if (state.page === "nodes" || state.page === "settings") await loadNodes();
+  if (state.page === "settings") await loadProviderSettings();
   if (state.page === "frpc") await loadLogs();
   render();
 }));

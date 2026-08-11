@@ -43,12 +43,18 @@ The backend is Rust/Axum/Tokio/SQLx/SQLite. The WebUI is plain static HTML, CSS 
 
 ```bash
 cp .env.example .env
-# Fill CHMLFRP_TOKEN and, when DNS management is used,
-# CLOUDFLARE_API_TOKEN + CLOUDFLARE_ZONE_ID.
 docker compose up -d
 ```
 
-Persistent state is under `/data`. For Unraid the template maps it to:
+No provider token is required to start the container. Open **WebUI → Settings** after startup:
+
+1. Enter the ChmlFrp API token, click **Test connection**, then save it. The shared client is reconfigured immediately; no Docker restart is required.
+2. Enter a scoped Cloudflare API token, click **Verify token / Load zones**, select the zone, run the read-only Token + Zone test, then save it.
+3. Choose the initial global Active/Standby nodes and save the routing policy. After an Active node exists, later Active-node changes must use **GLOBAL_FAILOVER**.
+
+`CHMLFRP_*` and `CLOUDFLARE_*` environment variables remain optional one-shot compatibility seeds. They are imported only on the first v0.3+ startup; after that, SQLite/WebUI is authoritative. Even an explicit **Clear Token** remains cleared after later container restarts.
+
+Persistent state is under `/data`, including the SQLite provider settings/secrets. For Unraid the template maps it to:
 
 ```text
 /mnt/cache/appdata/ashan-frp-control-center -> /data
@@ -61,6 +67,14 @@ Place the Linux amd64 `frpc` executable at:
 ```
 
 and make it executable. ChmlFrp remains responsible for generating the configuration used at `/data/frpc/frpc.ini`.
+
+## Provider authorization and connection tests
+
+The Settings page never returns a saved provider token to the browser. Password fields are blank after save and only show whether a token is configured. A new non-empty token replaces the stored value; explicit **Clear Token** actions remove it. Provider changes are blocked while a global reconcile/failover operation owns the coordinator lock.
+
+ChmlFrp documents a browser authorization-login flow for its own clients. The current public material does not document third-party OAuth client registration and a callback URI for self-hosted control panels, so this project does **not** reuse or impersonate ChmlFrp's own OAuth client. The WebUI instead offers a direct link to the official ChmlFrp panel for account/authorization/token management and uses the supported API token for control-plane access.
+
+Cloudflare testing is non-destructive: the WebUI verifies the API token, lists accessible zones and reads A records for the selected zone. It does not create a temporary record just to prove DNS Edit permission.
 
 ## Development
 

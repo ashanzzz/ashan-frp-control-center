@@ -4,6 +4,18 @@
 
 Back up `/data` as one unit. It contains SQLite state, FRPC configuration revisions and the FRPC runtime files. On Unraid use `/mnt/cache/appdata/ashan-frp-control-center`.
 
+## First-start provider setup
+
+The container can start with no ChmlFrp or Cloudflare credentials. Open **Settings** in the WebUI:
+
+1. ChmlFrp: paste the API token, run the read-only connection test, then save.
+2. Cloudflare: paste a scoped token, verify it and load accessible zones, choose a Zone ID, run the Token + Zone read test, then save.
+3. Configure the initial global Active/Standby nodes.
+
+Provider settings are stored in SQLite under `/data` and hot-reconfigure the shared clients immediately. Docker restart is not required. Environment variables are optional first-start seeds only and do not override an already-stored provider token.
+
+The ChmlFrp button opens the official panel for its browser-based account/authorization flow. This control center does not claim third-party OAuth support until ChmlFrp publishes a third-party client registration/callback contract.
+
 ## Upgrade
 
 Pull the new GHCR image and restart the container. Database migrations run automatically on startup. Do not delete `/data` during upgrades.
