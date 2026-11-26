@@ -136,6 +136,26 @@ pub struct RoutingUpdate {
     pub failover_enabled: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeTag {
+    pub code: String,
+    pub label: String,
+    pub tone: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodePolicyFlags {
+    pub attacked: bool,
+    pub forbids_drive: bool,
+    pub high_bandwidth: bool,
+    pub bandwidth_limited: bool,
+    pub requires_icp: bool,
+    pub requires_whitelist: bool,
+    pub bans_overseas: bool,
+    pub high_load: bool,
+    pub unstable_hint: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeSummary {
     pub id: i64,
@@ -145,9 +165,144 @@ pub struct NodeSummary {
     pub state: String,
     pub real_ip: Option<String>,
     pub host: Option<String>,
+    #[serde(default)]
+    pub frps_port: Option<u16>,
+    #[serde(default)]
+    pub nodegroup: Option<String>,
+    #[serde(default)]
+    pub china: Option<bool>,
+    #[serde(default)]
+    pub fangyu: Option<bool>,
+    #[serde(default)]
+    pub udp: Option<bool>,
+    #[serde(default)]
+    pub toowhite: Option<bool>,
     pub load1: Option<f64>,
+    #[serde(default)]
+    pub load5: Option<f64>,
+    #[serde(default)]
+    pub load15: Option<f64>,
     pub bandwidth_usage_percent: Option<f64>,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub tags: Vec<NodeTag>,
+    #[serde(default)]
+    pub policy: NodePolicyFlags,
     pub quarantined_until: Option<String>,
+}
+
+impl NodeSummary {
+    /// Parse ChmlFrp node `notes` and telemetry (`load1`, `fangyu`, `china`, etc.)
+    /// into machine-readable `policy` flags and display `tags`.
+    pub fn classify(&mut self) {
+        let notes = self.notes.as_str();
+        let attacked = notes.contains("节点被攻击") || notes.contains("暂时无法使用");
+        let forbids_drive = notes.contains("禁止大流量")
+            || notes.contains("禁止用于文件传输")
+            || (notes.contains("禁止") && notes.contains("网盘"));
+        let bandwidth_limited = notes.contains("高峰期限速")
+            || notes.contains("限速严重")
+            || notes.contains("线路较差");
+        let high_bandwidth = !forbids_drive
+            && !bandwidth_limited
+            && (notes.contains("超大带宽")
+                || notes.contains("超高带宽")
+                || notes.contains("10G")
+                || notes.contains("AS4837")
+                || notes.contains("大带宽")
+                || notes.contains("跑满带宽")
+                || notes.contains("强烈建议文件传输"));
+        let requires_icp = notes.contains("备案");
+        let requires_whitelist = self.toowhite == Some(true) || notes.contains("过白");
+        let bans_overseas = notes.contains("ban海外") || notes.contains("封海外");
+        let high_load = self.load1.is_some_and(|l| l >= 3.0)
+            || self.bandwidth_usage_percent.is_some_and(|b| b >= 85.0)
+            || notes.contains("负载较高")
+            || notes.contains("负载较大");
+        let unstable_hint = notes.contains("每日凌晨中断")
+            || notes.contains("动态ip")
+            || notes.contains("晚高峰较差");
+
+        self.policy = NodePolicyFlags {
+            attacked,
+            forbids_drive,
+            high_bandwidth,
+            bandwidth_limited,
+            requires_icp,
+            requires_whitelist,
+            bans_overseas,
+            high_load,
+            unstable_hint,
+        };
+
+        let mut tags = Vec::new();
+        let push_tag = |tags: &mut Vec<NodeTag>, code: &str, label: &str, tone: &str| {
+            tags.push(NodeTag {
+                code: code.to_owned(),
+                label: label.to_owned(),
+                tone: tone.to_owned(),
+            });
+        };
+
+        if attacked {
+            push_tag(&mut tags, "attacked", "被攻击/不可用", "bad");
+        }
+        if self.web_supported {
+            push_tag(&mut tags, "web", "可建站", "ok");
+        } else {
+            push_tag(&mut tags, "no_web", "不支持建站", "");
+        }
+        if high_bandwidth {
+            let label = if notes.contains("10G") {
+                "10G大带宽"
+            } else if notes.contains("AS4837") {
+                "AS4837超大带宽"
+            } else {
+                "大带宽"
+            };
+            push_tag(&mut tags, "high_bw", label, "ok");
+        }
+        if forbids_drive {
+            push_tag(&mut tags, "no_drive", "禁网盘/大流量", "bad");
+        }
+        if bandwidth_limited {
+            push_tag(&mut tags, "bw_limited", "限速/线路较差", "warn");
+        }
+        if high_load {
+            push_tag(&mut tags, "high_load", "高负载", "bad");
+        } else if !attacked && !unstable_hint && self.load1.is_some_and(|l| l < 1.5) {
+            push_tag(&mut tags, "stable", "稳定低负载", "ok");
+        }
+        if unstable_hint {
+            push_tag(&mut tags, "unstable", "波动/定时中断", "warn");
+        }
+        if requires_icp {
+            push_tag(&mut tags, "icp", "需备案", "warn");
+        } else if self.china == Some(false) {
+            push_tag(&mut tags, "no_icp", "免备案", "");
+        }
+        if requires_whitelist {
+            push_tag(&mut tags, "whitelist", "需过白", "warn");
+        }
+        if bans_overseas {
+            push_tag(&mut tags, "ban_overseas", "封海外", "warn");
+        }
+        match self.fangyu {
+            Some(true) => push_tag(&mut tags, "defense", "有防御", ""),
+            Some(false) => push_tag(&mut tags, "no_defense", "无防御", "warn"),
+            None => {}
+        }
+        if self
+            .nodegroup
+            .as_deref()
+            .is_some_and(|g| g.eq_ignore_ascii_case("vip"))
+        {
+            push_tag(&mut tags, "vip", "VIP", "ok");
+        }
+
+        self.tags = tags;
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,6 +387,10 @@ pub struct ProviderSettingsView {
     pub probe_port: u16,
     pub probe_timeout_ms: u64,
     pub probe_latency_tolerance_ms: u64,
+    pub probe_require_high_bandwidth: bool,
+    pub probe_exclude_icp_required: bool,
+    pub probe_exclude_whitelist_and_ban_overseas: bool,
+    pub probe_max_load1: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -263,6 +422,14 @@ pub struct ProviderSettingsUpdate {
     pub probe_timeout_ms: u64,
     #[serde(default = "default_probe_latency_tolerance_ms")]
     pub probe_latency_tolerance_ms: u64,
+    #[serde(default = "default_true")]
+    pub probe_require_high_bandwidth: bool,
+    #[serde(default)]
+    pub probe_exclude_icp_required: bool,
+    #[serde(default = "default_true")]
+    pub probe_exclude_whitelist_and_ban_overseas: bool,
+    #[serde(default = "default_probe_max_load1")]
+    pub probe_max_load1: f64,
 }
 
 fn default_probe_port() -> u16 {
@@ -273,6 +440,12 @@ fn default_probe_timeout_ms() -> u64 {
 }
 fn default_probe_latency_tolerance_ms() -> u64 {
     50
+}
+fn default_true() -> bool {
+    true
+}
+fn default_probe_max_load1() -> f64 {
+    5.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -328,5 +501,55 @@ mod tests {
         ] {
             assert_eq!(RoutingPhase::from_str(phase.as_str()).unwrap(), phase);
         }
+    }
+
+    #[test]
+    fn classify_extracts_attack_drive_and_bandwidth_tags() {
+        let mut sy = super::NodeSummary {
+            id: 114,
+            name: "沈阳电信".into(),
+            area: "中国辽宁省沈阳市".into(),
+            web_supported: true,
+            state: "online".into(),
+            real_ip: None,
+            host: None,
+            frps_port: Some(7000),
+            nodegroup: Some("vip".into()),
+            china: Some(true),
+            fangyu: Some(false),
+            udp: Some(true),
+            toowhite: Some(false),
+            load1: Some(0.04),
+            load5: None,
+            load15: None,
+            bandwidth_usage_percent: Some(1.0),
+            notes:
+                "禁止任何高概率会被攻击业务，此节点禁止大流量（例如MC联机、网盘、长期大文件传输）"
+                    .into(),
+            tags: Vec::new(),
+            policy: Default::default(),
+            quarantined_until: None,
+        };
+        sy.classify();
+        assert!(!sy.policy.attacked);
+        assert!(sy.policy.forbids_drive);
+        assert!(!sy.policy.high_bandwidth);
+        assert!(sy.tags.iter().any(|t| t.code == "no_drive"));
+
+        let mut bj = sy.clone();
+        bj.notes = "节点被攻击，暂时无法使用。建站需备案接入腾讯云".into();
+        bj.classify();
+        assert!(bj.policy.attacked);
+        assert!(bj.policy.requires_icp);
+
+        let mut la3 = sy.clone();
+        la3.notes = "超大带宽节点，中国大陆优化，AS4837线路。强烈建议文件传输使用".into();
+        la3.china = Some(false);
+        la3.fangyu = Some(true);
+        la3.classify();
+        assert!(la3.policy.high_bandwidth);
+        assert!(!la3.policy.forbids_drive);
+        assert!(la3.tags.iter().any(|t| t.code == "high_bw"));
+        assert!(la3.tags.iter().any(|t| t.code == "no_icp"));
     }
 }

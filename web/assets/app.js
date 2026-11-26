@@ -11,6 +11,7 @@ const state = {
   dnsDiagnostics: null,
   lastDeletedDns: null,
   providerFeedback: { chmlfrp: null, cloudflare: null },
+  nodeFilter: "all",
   busy: false,
   refreshing: false,
 };
@@ -279,6 +280,28 @@ function renderDiagnostics(data, type) {
   </div>`;
 }
 
+function nodeMatchesPolicy(node, p = state.providerSettings) {
+  if (!node || String(node.state || "").toLowerCase() !== "online" || node.quarantined_until) return false;
+  const pol = node.policy || {};
+  if (pol.attacked || !node.web_supported) return false;
+  const reqBw = p?.probe_require_high_bandwidth ?? true;
+  if (reqBw && (pol.forbids_drive || pol.bandwidth_limited)) return false;
+  const exclIcp = p?.probe_exclude_icp_required ?? false;
+  if (exclIcp && pol.requires_icp) return false;
+  const exclWl = p?.probe_exclude_whitelist_and_ban_overseas ?? true;
+  if (exclWl && (pol.requires_whitelist || pol.bans_overseas)) return false;
+  const maxLoad = p?.probe_max_load1 ?? 5.0;
+  if (node.load1 !== null && node.load1 !== undefined && Number(node.load1) > maxLoad) return false;
+  return true;
+}
+
+function renderNodeTags(node) {
+  const tags = Array.isArray(node.tags) && node.tags.length
+    ? node.tags
+    : [{ label: node.web_supported ? "可建站" : "不支持建站", tone: node.web_supported ? "ok" : "" }];
+  return `<div class="tag-row">${tags.map((t) => simpleBadge(t.label, t.tone || "")).join("")}</div>`;
+}
+
 function renderChmlfrp() {
   const d = state.dashboard;
   const p = state.providerSettings;
@@ -288,26 +311,61 @@ function renderChmlfrp() {
     const endpoint = tunnel.band_domain || tunnel.remote_endpoint || "—";
     return `<tr><td><strong>${esc(tunnel.tunnel_name)}</strong><small>ID ${esc(tunnel.tunnel_id)}</small></td><td>${esc(tunnel.node)}</td><td>${esc(tunnel.port_type)}</td><td>${esc(tunnel.local_ip)}:${esc(tunnel.local_port)}</td><td>${esc(endpoint)}</td><td>${esc(tunnel.tunnel_state || "—")}</td><td>${managed ? simpleBadge("Managed", "ok") : simpleBadge("Unmanaged")}</td><td><div class="inline-actions">${managed ? `<button disabled title="受管资源请修改 Plan 后执行全局同步">由 HA 管理</button>` : `<button data-remote-edit="${tunnel.tunnel_id}">编辑</button><button data-remote-test="${tunnel.tunnel_id}">写入测试</button><button data-import-tunnel="${tunnel.tunnel_id}">导入</button>`}<button class="danger" disabled title="ChmlFrp v2 官方删除接口当前不可用">删除不可用</button></div></td></tr>`;
   }).join("");
-  const nodeRows = state.nodes.map((node) => {
+  const probeByName = new Map((state.probeResults || []).map((r) => [r.node_name, r]));
+  const eligibleCount = state.nodes.filter((n) => nodeMatchesPolicy(n, p)).length;
+  const webCount = state.nodes.filter((n) => n.web_supported).length;
+  const filteredNodes = state.nodes.filter((node) => {
+    if (state.nodeFilter === "recommended") {
+      const pr = probeByName.get(node.name);
+      return pr ? Boolean(pr.eligible) : nodeMatchesPolicy(node, p);
+    }
+    if (state.nodeFilter === "web") return Boolean(node.web_supported);
+    return true;
+  });
+  const sortedNodes = [...filteredNodes].sort((a, b) => {
+    if (!state.probeResults?.length) return 0;
+    const pa = probeByName.get(a.name);
+    const pb = probeByName.get(b.name);
+    if (Boolean(pb?.recommended) !== Boolean(pa?.recommended)) return pb?.recommended ? 1 : -1;
+    if (Boolean(pb?.eligible) !== Boolean(pa?.eligible)) return pb?.eligible ? 1 : -1;
+    const ra = pa?.avg_rtt_ms ?? Number.POSITIVE_INFINITY;
+    const rb = pb?.avg_rtt_ms ?? Number.POSITIVE_INFINITY;
+    return ra - rb;
+  });
+  const nodeRows = sortedNodes.map((node) => {
     let role = "—";
     if (d.routing.active_node === node.name) role = simpleBadge("ACTIVE", "ok");
     else if (d.routing.standby_node === node.name) role = simpleBadge("STANDBY", "warn");
     const quarantine = node.quarantined_until ? `${simpleBadge("隔离", "bad")} ${esc(node.quarantined_until)} <button data-unquarantine="${esc(node.name)}">解除</button>` : "—";
-    const probeResult = state.probeResults?.find((r) => r.node_name === node.name);
-    const rttCell = probeResult
-      ? probeResult.avg_rtt_ms === null
-        ? simpleBadge("超时", "bad")
-        : `${probeResult.fastest ? simpleBadge("最快", "ok") + " " : ""}${Number(probeResult.avg_rtt_ms).toFixed(1)} ms`
-      : "—";
-    return `<tr><td><strong>${esc(node.name)}</strong><small>${esc(node.area)} · ${node.web_supported ? "支持建站" : "不支持建站"}</small></td><td>${esc(node.real_ip || "—")}</td><td>${esc(node.state)}</td><td>${role}</td><td>${rttCell}</td><td>${quarantine}</td></tr>`;
+    const probeResult = probeByName.get(node.name);
+    let rttCell = "—";
+    if (probeResult) {
+      if (probeResult.avg_rtt_ms === null) {
+        rttCell = `${simpleBadge("超时", "bad")}${probeResult.ineligible_reasons?.length ? `<small>${esc(probeResult.ineligible_reasons.join(" · "))}</small>` : ""}`;
+      } else {
+        const badges = [
+          probeResult.recommended ? simpleBadge("推荐", "ok") : "",
+          probeResult.fastest ? simpleBadge("最快", probeResult.recommended ? "ok" : "warn") : "",
+        ].filter(Boolean).join(" ");
+        const reasonLine = !probeResult.eligible && probeResult.ineligible_reasons?.length
+          ? `<small>${esc("排除: " + probeResult.ineligible_reasons.join(" · "))}</small>`
+          : "";
+        rttCell = `${badges ? badges + " " : ""}${Number(probeResult.avg_rtt_ms).toFixed(1)} ms${reasonLine}`;
+      }
+    }
+    const portText = node.frps_port ? `:${node.frps_port}` : "";
+    const loadText = node.load1 !== null && node.load1 !== undefined ? `${Number(node.load1).toFixed(2)}` : "—";
+    const bwText = node.bandwidth_usage_percent !== null && node.bandwidth_usage_percent !== undefined ? `${Number(node.bandwidth_usage_percent).toFixed(0)}%` : "—";
+    const notesHtml = node.notes ? `<small class="node-notes" title="${esc(node.notes)}">${esc(node.notes)}</small>` : "";
+    return `<tr><td><strong>${esc(node.name)}</strong><small>${esc(node.area)}</small>${renderNodeTags(node)}${notesHtml}</td><td class="mono-cell">${esc(node.real_ip || "—")}${esc(portText)}<small>${esc(node.host || "")}</small></td><td><div>${esc(node.state)}</div><small>负载 ${loadText} · 带宽 ${bwText}</small></td><td>${role}</td><td>${rttCell}</td><td>${quarantine}</td></tr>`;
   }).join("");
   return `<div class="provider-console-head"><div><h2>ChmlFrp API</h2><p>${esc(d.chmlfrp_health.message)}</p></div>${simpleBadge(connected ? "Connected" : (p?.chmlfrp_token_configured ? "Disconnected" : "未配置"), connected ? "ok" : (p?.chmlfrp_token_configured ? "bad" : ""))}</div>
-    <div class="actions resource-toolbar"><button id="chml-refresh">刷新资源</button><button id="chml-diag">API 诊断</button><button id="chml-create" ${connected ? "" : "disabled"}>+ 创建 ChmlFrp 隧道</button><button id="probe-nodes-btn" ${connected ? "" : "disabled"} title="对在线节点并发 TCP 探针，测量到 frpc 端口的延迟">测量全部节点</button>${!connected ? `<button data-goto="settings">前往设置</button>` : ""}</div>
+    <div class="actions resource-toolbar"><button id="chml-refresh">刷新资源</button><button id="chml-diag">API 诊断</button><button id="chml-create" ${connected ? "" : "disabled"}>+ 创建 ChmlFrp 隧道</button><button id="probe-nodes-btn" ${connected ? "" : "disabled"} title="按每个节点 /nodeinfo 真实 FRPS 端口并发 TCP 探针测速">测量全部节点</button>${!connected ? `<button data-goto="settings">前往设置</button>` : ""}</div>
     ${renderDiagnostics(state.chmlDiagnostics, "chml")}
     <h2 class="section-title">远端隧道 <span class="count-pill">${state.remoteTunnels.length}</span></h2>
     <div class="table-wrap"><table><thead><tr><th>隧道</th><th>节点</th><th>协议</th><th>本地</th><th>外部</th><th>状态</th><th>纳管</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">${connected ? "未读取到隧道" : "请先配置 ChmlFrp"}</td></tr>`}</tbody></table></div>
-    <div class="section-separator"></div><h2 class="section-title">节点 <span class="count-pill">${state.nodes.length}</span></h2>
-    <div class="table-wrap"><table><thead><tr><th>节点</th><th>真实 IP</th><th>状态</th><th>角色</th><th>探针延迟</th><th>隔离</th></tr></thead><tbody>${nodeRows || `<tr><td colspan="6" class="muted">暂无节点数据</td></tr>`}</tbody></table></div>`;
+    <div class="section-separator"></div><div class="node-section-head"><h2 class="section-title">节点 <span class="count-pill">${sortedNodes.length}/${state.nodes.length}</span></h2><div class="actions filter-pills"><button type="button" data-node-filter="all" class="${state.nodeFilter === "all" ? "active" : ""}">全部 (${state.nodes.length})</button><button type="button" data-node-filter="recommended" class="${state.nodeFilter === "recommended" ? "active" : ""}">建站+网盘可用 (${eligibleCount})</button><button type="button" data-node-filter="web" class="${state.nodeFilter === "web" ? "active" : ""}">仅看可建站 (${webCount})</button></div></div>
+    <div class="table-wrap"><table><thead><tr><th>节点 / 标签 / 官方说明</th><th>真实 IP / 端口</th><th>状态 / 负载</th><th>角色</th><th>探针延迟</th><th>隔离</th></tr></thead><tbody>${nodeRows || `<tr><td colspan="6" class="muted">暂无匹配节点</td></tr>`}</tbody></table></div>`;
 }
 
 function renderDns() {
@@ -382,14 +440,18 @@ function renderSettings() {
       <div class="provider-actions"><button type="button" id="chml-test">测试连接</button><button type="button" id="chml-save">保存并立即验证</button><button type="button" id="chml-sso-login">SSO + 2FA 自动登录</button>${p.chmlfrp_token_configured ? `<button type="button" id="chml-clear" class="danger">清除 Token</button>` : ""}<a class="button-link" href="https://panel.chmlfrp.net/" target="_blank" rel="noopener noreferrer">打开 ChmlFrp 官方面板获取 API Token</a></div>
       <p class="provider-note">配置轻爪账号密码与 2FA TOTP 密钥后，系统会在 Token 过期时自动刷新或重登自愈，无需人工介入。</p>
     </section>
-    <section class="settings-card"><div class="settings-card-head"><div><h2>节点延迟探针</h2><p>Failover 时对候选节点并发 TCP 探针，选延迟最低节点。</p></div></div>
+    <section class="settings-card"><div class="settings-card-head"><div><h2>节点延迟探针与选型策略</h2><p>按节点真实 FRPS 端口并发 TCP 探针测速，并结合建站、网盘大带宽与稳定性标签过滤排序。</p></div></div>
       <div class="form-grid">
-        <label>探针端口 (frpc 监听端口)<input id="probe-port" type="number" min="1" max="65535" value="${esc(p.probe_port ?? 7000)}"></label>
+        <label>默认回退端口 (当节点未返回 port 时使用)<input id="probe-port" type="number" min="1" max="65535" value="${esc(p.probe_port ?? 7000)}"></label>
         <label>单次连接超时 (ms)<input id="probe-timeout" type="number" min="100" max="30000" value="${esc(p.probe_timeout_ms ?? 2000)}"></label>
         <label>STANDBY 容忍带 (ms)<input id="probe-tolerance" type="number" min="0" max="5000" value="${esc(p.probe_latency_tolerance_ms ?? 50)}"></label>
+        <label>最大允许 load1 负载阈值<input id="probe-max-load1" type="number" min="0.5" max="100" step="0.5" value="${esc(p.probe_max_load1 ?? 5)}"></label>
       </div>
-      <div class="provider-actions"><button type="button" id="probe-settings-save">保存探针设置</button></div>
-      <p class="provider-note">探针通过 TCP 连接节点 IP 的 frpc 端口测量延迟（3次取平均）。STANDBY 容忍带：当 STANDBY 延迟 ≤ 最优 + 容忍带时，保持 STANDBY 优先。</p>
+      <label class="check compact-check"><input id="probe-require-bw" type="checkbox" ${p.probe_require_high_bandwidth ?? true ? "checked" : ""}> 兼容网盘 / 大带宽（排除禁大流量、禁网盘、高峰限速节点）</label>
+      <label class="check compact-check"><input id="probe-allow-icp" type="checkbox" ${!(p.probe_exclude_icp_required ?? false) ? "checked" : ""}> 允许需国内备案节点参与推荐（335356119.xyz 已备案建议勾选）</label>
+      <label class="check compact-check"><input id="probe-exclude-wl" type="checkbox" ${p.probe_exclude_whitelist_and_ban_overseas ?? true ? "checked" : ""}> 排除需加群过白 / 封禁海外 IP 节点（避免 Cloudflare 与 ACME 回源失败）</label>
+      <div class="provider-actions"><button type="button" id="probe-settings-save">保存探针与策略设置</button></div>
+      <p class="provider-note">探针自动使用各节点 /nodeinfo 中的真实 FRPS 端口（如 7000/7002/7100/8153），始终排除“被攻击/暂时无法使用”节点，并在可用节点中保持低延迟优先。</p>
     </section>
     <section class="settings-card"><div class="settings-card-head"><div><h2>Cloudflare</h2><p>保存 Token/Zone 后立即验证；DNS 资源操作在“DNS”页面完成。</p></div>${cfBadge}</div>
       <label>API Base URL<input id="cf-base" value="${esc(p.cloudflare_api_base)}" autocomplete="off" spellcheck="false"></label>
@@ -556,19 +618,30 @@ function bindPageActions() {
   $("#refresh-tunnels")?.addEventListener("click", async () => { await loadRemoteTunnels(); render(); });
   $("#chml-refresh")?.addEventListener("click", async () => { await Promise.all([loadRemoteTunnels(), loadNodes(), refresh()]); render(); });
   $("#chml-create")?.addEventListener("click", () => openRemoteTunnel());
+  document.querySelectorAll("[data-node-filter]").forEach((button) => button.addEventListener("click", () => {
+    state.nodeFilter = button.dataset.nodeFilter || "all";
+    render();
+  }));
   $("#probe-nodes-btn")?.addEventListener("click", async () => {
     try {
-      setAlert("正在探针所有在线节点延迟，请稍候…", "info");
+      setAlert("正在按各节点真实 FRPS 端口并发测速，请稍候…", "info");
       state.probeResults = await api("/api/v1/nodes/probe", { method: "POST" });
       const reachable = state.probeResults.filter((r) => r.avg_rtt_ms !== null);
-      const fastestWeb = reachable.find((r) => r.web_supported);
+      const recommended = state.probeResults.find((r) => r.recommended);
+      const bigBwWeb = reachable.find((r) => r.eligible && (r.tags || []).some((t) => t.code === "high_bw"));
       const fastestAny = reachable[0];
-      const summary = fastestWeb
-        ? `节点延迟探针完成：共测 ${state.probeResults.length} 个在线节点，${reachable.length} 个可达；最快建站节点 ${fastestWeb.node_name} (${Number(fastestWeb.avg_rtt_ms).toFixed(1)} ms)`
-        : fastestAny
-          ? `节点延迟探针完成：共测 ${state.probeResults.length} 个在线节点，${reachable.length} 个可达；最快节点 ${fastestAny.node_name} (${Number(fastestAny.avg_rtt_ms).toFixed(1)} ms)`
-          : "节点延迟探针完成：所有节点均超时，请检查探针端口设置。";
-      setAlert(summary, reachable.length ? "info" : "error");
+      let summary;
+      if (recommended) {
+        const bwHint = bigBwWeb && bigBwWeb.node_name !== recommended.node_name
+          ? ` · 标称大带宽低延迟参考：${bigBwWeb.node_name} (${Number(bigBwWeb.avg_rtt_ms).toFixed(1)} ms)`
+          : "";
+        summary = `节点探针完成：${state.probeResults.length} 个在线节点中 ${reachable.length} 个可达；策略推荐 ${recommended.node_name} (${Number(recommended.avg_rtt_ms).toFixed(1)} ms)${bwHint}`;
+      } else if (fastestAny) {
+        summary = `节点探针完成：${state.probeResults.length} 个在线节点中 ${reachable.length} 个可达，但无满足当前建站/网盘策略节点；最快物理延迟 ${fastestAny.node_name} (${Number(fastestAny.avg_rtt_ms).toFixed(1)} ms)`;
+      } else {
+        summary = "节点延迟探针完成：所有节点均超时，请检查网络或探针超时设置。";
+      }
+      setAlert(summary, recommended ? "info" : "error");
       render();
     } catch (error) { setAlert("节点探针失败：" + error.message); }
   });
@@ -685,12 +758,36 @@ async function testChmlFrp(useInputs = true) {
   }
 }
 
+function buildProviderUpdatePayload(overrides = {}) {
+  const p = state.providerSettings || {};
+  return {
+    chmlfrp_base_url: p.chmlfrp_base_url,
+    chmlfrp_token: null,
+    clear_chmlfrp_token: false,
+    cloudflare_api_base: p.cloudflare_api_base,
+    cloudflare_api_token: null,
+    clear_cloudflare_api_token: false,
+    cloudflare_zone_id: p.cloudflare_zone_id,
+    probe_port: p.probe_port ?? 7000,
+    probe_timeout_ms: p.probe_timeout_ms ?? 2000,
+    probe_latency_tolerance_ms: p.probe_latency_tolerance_ms ?? 50,
+    probe_require_high_bandwidth: p.probe_require_high_bandwidth ?? true,
+    probe_exclude_icp_required: p.probe_exclude_icp_required ?? false,
+    probe_exclude_whitelist_and_ban_overseas: p.probe_exclude_whitelist_and_ban_overseas ?? true,
+    probe_max_load1: p.probe_max_load1 ?? 5.0,
+    ...overrides,
+  };
+}
+
 async function saveChmlFrpSettings() {
   const p = state.providerSettings;
-  const probePort = Number($("#probe-port")?.value || p.probe_port || 7000);
-  const probeTimeout = Number($("#probe-timeout")?.value || p.probe_timeout_ms || 2000);
-  const probeTolerance = Number($("#probe-tolerance")?.value ?? p.probe_latency_tolerance_ms ?? 50);
-  const body = { chmlfrp_base_url: $("#chml-base").value.trim(), chmlfrp_token: $("#chml-token").value.trim() || null, clear_chmlfrp_token: false, chmlfrp_username: $("#chml-user")?.value.trim() ?? p.chmlfrp_username ?? "", chmlfrp_password: $("#chml-pass")?.value.trim() || null, chmlfrp_totp_secret: $("#chml-totp")?.value.trim() || null, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id, probe_port: probePort, probe_timeout_ms: probeTimeout, probe_latency_tolerance_ms: probeTolerance };
+  const body = buildProviderUpdatePayload({
+    chmlfrp_base_url: $("#chml-base").value.trim(),
+    chmlfrp_token: $("#chml-token").value.trim() || null,
+    chmlfrp_username: $("#chml-user")?.value.trim() ?? p.chmlfrp_username ?? "",
+    chmlfrp_password: $("#chml-pass")?.value.trim() || null,
+    chmlfrp_totp_secret: $("#chml-totp")?.value.trim() || null,
+  });
   try {
     setProviderFeedback("chmlfrp", "正在保存配置…");
     state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });
@@ -720,24 +817,32 @@ async function ssoLoginChmlFrp() {
 }
 
 async function saveProbeSettings() {
-  const p = state.providerSettings;
   const probePort = Number($("#probe-port").value);
   const probeTimeout = Number($("#probe-timeout").value);
   const probeTolerance = Number($("#probe-tolerance").value);
+  const maxLoad1 = Number($("#probe-max-load1").value);
   if (!probePort || probePort < 1 || probePort > 65535) { setAlert("探针端口必须在 1-65535 之间"); return; }
   if (!probeTimeout || probeTimeout < 100) { setAlert("超时不能小于 100ms"); return; }
-  const body = { chmlfrp_base_url: p.chmlfrp_base_url, chmlfrp_token: null, clear_chmlfrp_token: false, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id, probe_port: probePort, probe_timeout_ms: probeTimeout, probe_latency_tolerance_ms: probeTolerance };
+  if (!maxLoad1 || maxLoad1 < 0.5) { setAlert("最大 load1 负载阈值不能小于 0.5"); return; }
+  const body = buildProviderUpdatePayload({
+    probe_port: probePort,
+    probe_timeout_ms: probeTimeout,
+    probe_latency_tolerance_ms: probeTolerance,
+    probe_require_high_bandwidth: $("#probe-require-bw").checked,
+    probe_exclude_icp_required: !$("#probe-allow-icp").checked,
+    probe_exclude_whitelist_and_ban_overseas: $("#probe-exclude-wl").checked,
+    probe_max_load1: maxLoad1,
+  });
   try {
     state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });
-    setAlert("探针设置已保存。", "info");
+    setAlert("探针与节点选型策略已保存。", "info");
     render();
   } catch (error) { setAlert("保存探针设置失败：" + error.message); }
 }
 
 async function clearChmlFrpToken() {
   if (!(await confirmAction("清除 ChmlFrp Token", "清除后 ChmlFrp 资源管理、同步和故障切换不可用，直到重新配置。继续？"))) return;
-  const p = state.providerSettings;
-  const body = { chmlfrp_base_url: $("#chml-base").value.trim(), chmlfrp_token: null, clear_chmlfrp_token: true, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id, probe_port: p.probe_port ?? 7000, probe_timeout_ms: p.probe_timeout_ms ?? 2000, probe_latency_tolerance_ms: p.probe_latency_tolerance_ms ?? 50 };
+  const body = buildProviderUpdatePayload({ chmlfrp_base_url: $("#chml-base").value.trim(), clear_chmlfrp_token: true });
   try { state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) }); state.providerFeedback.chmlfrp = { message: "ChmlFrp Token 已清除", kind: "ok" }; await refresh(); state.nodes = []; state.remoteTunnels = []; render(); } catch (error) { setProviderFeedback("chmlfrp", error.message, "bad"); }
 }
 
@@ -769,8 +874,7 @@ async function testCloudflare(useInputs = true) {
 }
 
 async function saveCloudflareSettings() {
-  const p = state.providerSettings;
-  const body = { chmlfrp_base_url: p.chmlfrp_base_url, chmlfrp_token: null, clear_chmlfrp_token: false, cloudflare_api_base: $("#cf-base").value.trim(), cloudflare_api_token: $("#cf-token").value.trim() || null, clear_cloudflare_api_token: false, cloudflare_zone_id: $("#cf-zone").value.trim(), probe_port: p.probe_port ?? 7000, probe_timeout_ms: p.probe_timeout_ms ?? 2000, probe_latency_tolerance_ms: p.probe_latency_tolerance_ms ?? 50 };
+  const body = buildProviderUpdatePayload({ cloudflare_api_base: $("#cf-base").value.trim(), cloudflare_api_token: $("#cf-token").value.trim() || null, cloudflare_zone_id: $("#cf-zone").value.trim() });
   try {
     setProviderFeedback("cloudflare", "正在保存配置…");
     state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });
@@ -785,8 +889,7 @@ async function saveCloudflareSettings() {
 
 async function clearCloudflareToken() {
   if (!(await confirmAction("清除 Cloudflare Token", "清除后 DNS 读取、CRUD 和 HA DNS 切换不可用。继续？"))) return;
-  const p = state.providerSettings;
-  const body = { chmlfrp_base_url: p.chmlfrp_base_url, chmlfrp_token: null, clear_chmlfrp_token: false, cloudflare_api_base: $("#cf-base").value.trim(), cloudflare_api_token: null, clear_cloudflare_api_token: true, cloudflare_zone_id: $("#cf-zone").value.trim(), probe_port: p.probe_port ?? 7000, probe_timeout_ms: p.probe_timeout_ms ?? 2000, probe_latency_tolerance_ms: p.probe_latency_tolerance_ms ?? 50 };
+  const body = buildProviderUpdatePayload({ cloudflare_api_base: $("#cf-base").value.trim(), clear_cloudflare_api_token: true, cloudflare_zone_id: $("#cf-zone").value.trim() });
   try { state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) }); state.providerFeedback.cloudflare = { message: "Cloudflare Token 已清除", kind: "ok" }; state.dnsRecords = []; await refresh(); render(); } catch (error) { setProviderFeedback("cloudflare", error.message, "bad"); }
 }
 

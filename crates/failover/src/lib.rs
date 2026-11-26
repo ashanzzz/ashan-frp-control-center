@@ -8,22 +8,96 @@ pub struct ProbeResult {
     pub avg_rtt_ms: Option<f64>,
 }
 
+/// Candidate selection policy for node filtering and recommendations.
+#[derive(Debug, Clone)]
+pub struct CandidatePolicy {
+    pub require_web: bool,
+    pub require_high_bandwidth: bool,
+    pub exclude_icp_required: bool,
+    pub exclude_whitelist_and_ban_overseas: bool,
+    pub max_load1: f64,
+}
+
+impl Default for CandidatePolicy {
+    fn default() -> Self {
+        Self {
+            require_web: false,
+            require_high_bandwidth: true,
+            exclude_icp_required: false,
+            exclude_whitelist_and_ban_overseas: true,
+            max_load1: 5.0,
+        }
+    }
+}
+
+/// Human-readable exclusion reasons for a node under `policy`. Empty means eligible.
+pub fn ineligible_reasons(node: &NodeSummary, policy: &CandidatePolicy) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if !node.state.eq_ignore_ascii_case("online") {
+        reasons.push("节点离线");
+    }
+    if node.quarantined_until.is_some() {
+        reasons.push("故障隔离中");
+    }
+    if node.policy.attacked {
+        reasons.push("被攻击/暂时不可用");
+    }
+    if policy.require_web && !node.web_supported {
+        reasons.push("不支持建站");
+    }
+    if policy.require_high_bandwidth && node.policy.forbids_drive {
+        reasons.push("禁止网盘/大流量");
+    }
+    if policy.require_high_bandwidth && node.policy.bandwidth_limited {
+        reasons.push("高峰限速/线路较差");
+    }
+    if policy.exclude_icp_required && node.policy.requires_icp {
+        reasons.push("需域名备案");
+    }
+    if policy.exclude_whitelist_and_ban_overseas && node.policy.requires_whitelist {
+        reasons.push("需加群人工过白");
+    }
+    if policy.exclude_whitelist_and_ban_overseas && node.policy.bans_overseas {
+        reasons.push("封禁海外IP(影响Cloudflare)");
+    }
+    if node.load1.is_some_and(|l| l > policy.max_load1) {
+        reasons.push("负载过高");
+    }
+    reasons
+}
+
 pub fn ordered_candidates(
     active: &str,
     preferred_standby: Option<&str>,
     nodes: &[NodeSummary],
     require_web: bool,
 ) -> Vec<NodeSummary> {
+    let policy = CandidatePolicy {
+        require_web,
+        require_high_bandwidth: false,
+        exclude_icp_required: false,
+        exclude_whitelist_and_ban_overseas: false,
+        max_load1: f64::INFINITY,
+    };
+    ordered_candidates_with_policy(active, preferred_standby, nodes, &policy)
+}
+
+pub fn ordered_candidates_with_policy(
+    active: &str,
+    preferred_standby: Option<&str>,
+    nodes: &[NodeSummary],
+    policy: &CandidatePolicy,
+) -> Vec<NodeSummary> {
     let mut out = Vec::new();
     if let Some(name) = preferred_standby
         && let Some(node) = nodes
             .iter()
-            .find(|node| node.name == name && eligible(node, active, require_web))
+            .find(|node| node.name == name && eligible_with_policy(node, active, policy))
     {
         out.push(node.clone());
     }
     for node in nodes {
-        if eligible(node, active, require_web) && !out.iter().any(|n| n.name == node.name) {
+        if eligible_with_policy(node, active, policy) && !out.iter().any(|n| n.name == node.name) {
             out.push(node.clone());
         }
     }
@@ -33,7 +107,8 @@ pub fn ordered_candidates(
 /// Sort `candidates` by ascending probe RTT with STANDBY priority protection.
 ///
 /// If the preferred standby node's RTT is within `tolerance_ms` of the best RTT,
-/// it is kept at position 0. Otherwise, nodes are ordered by ascending RTT.
+/// it is kept at position 0. Otherwise, nodes are ordered by ascending RTT (breaking
+/// ties by big-bandwidth tag, defense availability, and lower load1).
 /// Nodes with no probe result (all timeouts) are appended at the end.
 pub fn sort_by_latency(
     candidates: Vec<NodeSummary>,
@@ -90,6 +165,14 @@ pub fn sort_by_latency(
         rtt_of(&a.name)
             .partial_cmp(&rtt_of(&b.name))
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.policy.high_bandwidth.cmp(&a.policy.high_bandwidth))
+            .then_with(|| b.fangyu.unwrap_or(false).cmp(&a.fangyu.unwrap_or(false)))
+            .then_with(|| {
+                a.load1
+                    .unwrap_or(f64::INFINITY)
+                    .partial_cmp(&b.load1.unwrap_or(f64::INFINITY))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
     result
 }
@@ -105,11 +188,8 @@ pub fn choose_target(
         .next()
 }
 
-fn eligible(node: &NodeSummary, active: &str, require_web: bool) -> bool {
-    node.name != active
-        && (!require_web || node.web_supported)
-        && node.state.eq_ignore_ascii_case("online")
-        && node.quarantined_until.is_none()
+fn eligible_with_policy(node: &NodeSummary, active: &str, policy: &CandidatePolicy) -> bool {
+    node.name != active && ineligible_reasons(node, policy).is_empty()
 }
 
 #[cfg(test)]
@@ -125,8 +205,19 @@ mod tests {
             state: "online".into(),
             real_ip: None,
             host: None,
-            load1: None,
-            bandwidth_usage_percent: None,
+            frps_port: Some(7000),
+            nodegroup: Some("vip".into()),
+            china: Some(true),
+            fangyu: Some(true),
+            udp: Some(true),
+            toowhite: Some(false),
+            load1: Some(0.2),
+            load5: None,
+            load15: None,
+            bandwidth_usage_percent: Some(1.0),
+            notes: String::new(),
+            tags: Vec::new(),
+            policy: Default::default(),
             quarantined_until: None,
         }
     }
@@ -212,5 +303,59 @@ mod tests {
         ];
         let result = sort_by_latency(candidates, &probes, None, 50);
         assert_eq!(result[2].name, "timeout_node");
+    }
+
+    #[test]
+    fn policy_filters_attacked_forbids_drive_high_load_and_whitelist() {
+        let mut attacked = node("北京多线");
+        attacked.notes = "节点被攻击，暂时无法使用。建站需备案接入腾讯云".into();
+        attacked.classify();
+
+        let mut sy = node("沈阳电信");
+        sy.notes = "此节点禁止大流量（例如MC联机、网盘、长期大文件传输）".into();
+        sy.classify();
+
+        let mut cq = node("重庆联通");
+        cq.load1 = Some(13.16);
+        cq.classify();
+
+        let mut qz = node("福建泉州电信");
+        qz.notes = "建站需加入交流群提交域名过白，节点ban海外".into();
+        qz.classify();
+
+        let mut cd = node("成都多线-2");
+        cd.notes = "建站需备案接入腾讯云".into();
+        cd.classify();
+
+        let mut la3 = node("美国洛杉矶-3");
+        la3.notes = "超大带宽节点，AS4837线路。强烈建议文件传输使用".into();
+        la3.china = Some(false);
+        la3.classify();
+
+        let policy = CandidatePolicy {
+            require_web: true,
+            require_high_bandwidth: true,
+            exclude_icp_required: false,
+            exclude_whitelist_and_ban_overseas: true,
+            max_load1: 5.0,
+        };
+        let list = vec![attacked, sy, cq, qz, cd.clone(), la3.clone()];
+        let out = ordered_candidates_with_policy("旧节点", None, &list, &policy);
+        let names: Vec<_> = out.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["成都多线-2", "美国洛杉矶-3"]);
+
+        // If ICP exclusion is enabled, 成都多线-2 is excluded too.
+        let strict_icp = CandidatePolicy {
+            exclude_icp_required: true,
+            ..policy
+        };
+        let out_no_icp = ordered_candidates_with_policy("旧节点", None, &list, &strict_icp);
+        assert_eq!(
+            out_no_icp
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["美国洛杉矶-3"]
+        );
     }
 }

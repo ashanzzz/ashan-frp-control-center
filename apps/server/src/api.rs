@@ -463,6 +463,11 @@ async fn sso_login_chmlfrp(
             probe_port: saved.probe_port.clamp(1, 65535) as u16,
             probe_timeout_ms: saved.probe_timeout_ms.max(100) as u64,
             probe_latency_tolerance_ms: saved.probe_latency_tolerance_ms.max(0) as u64,
+            probe_require_high_bandwidth: saved.probe_require_high_bandwidth,
+            probe_exclude_icp_required: saved.probe_exclude_icp_required,
+            probe_exclude_whitelist_and_ban_overseas: saved
+                .probe_exclude_whitelist_and_ban_overseas,
+            probe_max_load1: saved.probe_max_load1,
         };
         if let Err(err) = state.coordinator.apply_provider_settings(&update).await {
             return match err {
@@ -1444,8 +1449,9 @@ async fn events(
 }
 
 /// POST /api/v1/nodes/probe
-/// Probe all online non-quarantined ChmlFrp nodes for TCP latency.
-/// Requires ChmlFrp token to be configured.
+/// Probe all online non-quarantined ChmlFrp nodes on their real FRPS TCP ports,
+/// evaluate policy suitability (web support, attack status, drive/bandwidth rules, load),
+/// and return ranked results with tags and recommended node selection.
 async fn probe_nodes(State(state): State<ApiState>) -> ApiResult<serde_json::Value> {
     if !state.app.chml.configured() {
         return Err(ApiError::bad_request("ChmlFrp token not configured"));
@@ -1455,12 +1461,37 @@ async fn probe_nodes(State(state): State<ApiState>) -> ApiResult<serde_json::Val
         node.quarantined_until = state.app.db.quarantine_until(&node.name).await?;
     }
     let settings = state.app.db.provider_settings().await?;
+    let plans = state.app.db.list_tunnels().await?;
+    let require_web = if plans.is_empty() {
+        state
+            .app
+            .chml
+            .list_tunnels()
+            .await
+            .map(|tunnels| {
+                tunnels
+                    .iter()
+                    .any(|t| matches!(t.port_type.to_ascii_lowercase().as_str(), "http" | "https"))
+            })
+            .unwrap_or(true)
+    } else {
+        plans.iter().any(|p| {
+            p.enabled && matches!(p.protocol.to_ascii_lowercase().as_str(), "http" | "https")
+        })
+    };
+    let policy = ashan_frp_failover::CandidatePolicy {
+        require_web,
+        require_high_bandwidth: settings.probe_require_high_bandwidth,
+        exclude_icp_required: settings.probe_exclude_icp_required,
+        exclude_whitelist_and_ban_overseas: settings.probe_exclude_whitelist_and_ban_overseas,
+        max_load1: settings.probe_max_load1,
+    };
     let probe_cfg = ProbeSettings {
         probe_port: settings.probe_port.clamp(1, 65535) as u16,
         probe_timeout_ms: settings.probe_timeout_ms.max(100) as u64,
         probe_latency_tolerance_ms: settings.probe_latency_tolerance_ms.max(0) as u64,
     };
-    // Only probe online, non-quarantined nodes.
+    // Probe all online, non-quarantined nodes on their own frps_port so UI sees full data.
     let candidates: Vec<_> = nodes
         .iter()
         .filter(|n| n.state.eq_ignore_ascii_case("online") && n.quarantined_until.is_none())
@@ -1473,6 +1504,7 @@ async fn probe_nodes(State(state): State<ApiState>) -> ApiResult<serde_json::Val
                 .iter()
                 .map(|n| ashan_frp_node_probe::ProbeResult {
                     node: n.clone(),
+                    probed_port: n.frps_port.unwrap_or(probe_cfg.probe_port),
                     avg_rtt_ms: None,
                 })
                 .collect()
@@ -1481,15 +1513,48 @@ async fn probe_nodes(State(state): State<ApiState>) -> ApiResult<serde_json::Val
         .iter()
         .filter_map(|r| r.avg_rtt_ms)
         .fold(f64::INFINITY, f64::min);
+
+    let eligible_nodes: Vec<_> = results
+        .iter()
+        .filter(|r| {
+            r.avg_rtt_ms.is_some()
+                && ashan_frp_failover::ineligible_reasons(&r.node, &policy).is_empty()
+        })
+        .map(|r| r.node.clone())
+        .collect();
+    let probe_pairs: Vec<_> = results
+        .iter()
+        .map(|r| ashan_frp_failover::ProbeResult {
+            node_name: r.node.name.clone(),
+            avg_rtt_ms: r.avg_rtt_ms,
+        })
+        .collect();
+    // Recommend the lowest-latency eligible node (ignoring standby pin here so recommendation reflects best active choice).
+    let recommended_name =
+        ashan_frp_failover::sort_by_latency(eligible_nodes, &probe_pairs, None, 0)
+            .into_iter()
+            .next()
+            .map(|n| n.name);
+
     let data: Vec<_> = results
         .iter()
         .map(|r| {
+            let reasons = ashan_frp_failover::ineligible_reasons(&r.node, &policy);
+            let eligible = reasons.is_empty();
             serde_json::json!({
                 "node_name": r.node.name,
                 "area": r.node.area,
+                "frps_port": r.probed_port,
                 "web_supported": r.node.web_supported,
                 "avg_rtt_ms": r.avg_rtt_ms,
                 "fastest": r.avg_rtt_ms.is_some_and(|rtt| (rtt - best_rtt).abs() < 0.001),
+                "recommended": recommended_name.as_deref() == Some(r.node.name.as_str()),
+                "eligible": eligible,
+                "ineligible_reasons": reasons,
+                "load1": r.node.load1,
+                "bandwidth_usage_percent": r.node.bandwidth_usage_percent,
+                "notes": r.node.notes,
+                "tags": r.node.tags,
             })
         })
         .collect();

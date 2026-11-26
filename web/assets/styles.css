@@ -782,3 +782,42 @@ input,select {
 @media (max-width: 720px) {
   .restore-banner { align-items: stretch; flex-direction: column; }
 }
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.tag-row .badge {
+  font-size: 11px;
+  padding: 2px 7px;
+}
+.node-notes {
+  display: block;
+  max-width: 380px;
+  margin-top: 5px;
+  color: #8da0bb;
+  white-space: normal;
+  line-height: 1.35;
+}
+.node-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.node-section-head .section-title {
+  margin: 0;
+}
+.filter-pills button {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+.filter-pills button.active {
+  background: #24406e;
+  border-color: #4f7bd9;
+  color: #fff;
+}

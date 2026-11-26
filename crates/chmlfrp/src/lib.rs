@@ -1,7 +1,7 @@
 pub mod auth;
 
 use anyhow::{Context, Result, anyhow};
-use ashan_frp_domain::{NodeSummary, TunnelPlan};
+use ashan_frp_domain::{NodePolicyFlags, NodeSummary, TunnelPlan};
 use auth::{SsoTokenBundle, login_via_qzhua_sso, now_epoch_ms, refresh_sso_token};
 use futures_util::future::join_all;
 use reqwest::Client;
@@ -363,18 +363,7 @@ impl ChmlFrpClient {
         if !self.configured() {
             return Ok(items
                 .into_iter()
-                .map(|item| NodeSummary {
-                    id: item.id,
-                    name: item.name,
-                    area: item.area,
-                    web_supported: item.web.eq_ignore_ascii_case("yes"),
-                    state: nonempty(item.state).unwrap_or_else(|| "unknown".to_owned()),
-                    real_ip: None,
-                    host: None,
-                    load1: None,
-                    bandwidth_usage_percent: None,
-                    quarantined_until: None,
-                })
+                .map(|item| build_node_summary(Some(&item), None))
                 .collect());
         }
 
@@ -390,54 +379,17 @@ impl ChmlFrpClient {
         let nodes = items
             .into_iter()
             .zip(details)
-            .map(|(item, detail)| {
-                let fallback_state = nonempty(item.state).unwrap_or_else(|| "unknown".to_owned());
-                NodeSummary {
-                    id: item.id,
-                    name: item.name,
-                    area: item.area,
-                    web_supported: item.web.eq_ignore_ascii_case("yes"),
-                    state: detail
-                        .as_ref()
-                        .map(|value| value.state.clone())
-                        .filter(|s| !s.trim().is_empty())
-                        .unwrap_or(fallback_state),
-                    real_ip: detail
-                        .as_ref()
-                        .map(|value| value.real_ip.clone())
-                        .filter(|s| !s.trim().is_empty()),
-                    host: detail
-                        .as_ref()
-                        .map(|value| value.ip.clone())
-                        .filter(|s| !s.trim().is_empty()),
-                    load1: detail.as_ref().map(|value| value.load1),
-                    bandwidth_usage_percent: detail
-                        .as_ref()
-                        .map(|value| value.bandwidth_usage_percent),
-                    quarantined_until: None,
-                }
-            })
+            .map(|(item, detail)| build_node_summary(Some(&item), detail.as_ref()))
             .collect();
         Ok(nodes)
     }
 
     pub async fn node_summary(&self, node: &str) -> Result<NodeSummary> {
-        let info = self.node_info(node).await?;
-        let name = nonempty(info.name).unwrap_or_else(|| node.to_owned());
-        let real_ip = nonempty(info.real_ip);
-        let host = nonempty(info.ip);
-        Ok(NodeSummary {
-            id: info.id,
-            name,
-            area: info.area,
-            web_supported: info.web.eq_ignore_ascii_case("yes"),
-            state: info.state,
-            real_ip,
-            host,
-            load1: Some(info.load1),
-            bandwidth_usage_percent: Some(info.bandwidth_usage_percent),
-            quarantined_until: None,
-        })
+        let mut info = self.node_info(node).await?;
+        if info.name.trim().is_empty() {
+            info.name = node.to_owned();
+        }
+        Ok(build_node_summary(None, Some(&info)))
     }
 
     pub async fn node_info(&self, node: &str) -> Result<NodeInfo> {
@@ -697,6 +649,86 @@ pub struct ChmlUserInfo {
     pub usergroup: String,
 }
 
+fn parse_optional_boolish(value: &str) -> Option<bool> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn build_node_summary(item: Option<&NodeListItem>, detail: Option<&NodeInfo>) -> NodeSummary {
+    let id = item
+        .map(|i| i.id)
+        .or_else(|| detail.map(|d| d.id))
+        .unwrap_or_default();
+    let name = item
+        .map(|i| i.name.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| detail.map(|d| d.name.clone()))
+        .unwrap_or_default();
+    let area = item
+        .map(|i| i.area.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| detail.map(|d| d.area.clone()))
+        .unwrap_or_default();
+    let web_str = detail
+        .map(|d| d.web.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| item.map(|i| i.web.as_str()))
+        .unwrap_or("");
+    let state = detail
+        .map(|d| d.state.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| item.and_then(|i| nonempty(i.state.clone())))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let notes = detail
+        .map(|d| d.notes.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| item.map(|i| i.notes.clone()))
+        .unwrap_or_default();
+    let nodegroup = detail
+        .map(|d| d.nodegroup.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| item.and_then(|i| nonempty(i.nodegroup.clone())));
+    let china = detail
+        .and_then(|d| parse_optional_boolish(&d.china))
+        .or_else(|| item.and_then(|i| parse_optional_boolish(&i.china)));
+    let fangyu = detail
+        .and_then(|d| parse_optional_boolish(&d.fangyu))
+        .or_else(|| item.and_then(|i| parse_optional_boolish(&i.fangyu)));
+    let udp = detail
+        .and_then(|d| parse_optional_boolish(&d.udp))
+        .or_else(|| item.and_then(|i| parse_optional_boolish(&i.udp)));
+
+    let mut summary = NodeSummary {
+        id,
+        name,
+        area,
+        web_supported: web_str.eq_ignore_ascii_case("yes") || parse_boolish(web_str),
+        state,
+        real_ip: detail.and_then(|d| nonempty(d.real_ip.clone())),
+        host: detail.and_then(|d| nonempty(d.ip.clone())),
+        frps_port: detail.and_then(|d| u16::try_from(d.port).ok().filter(|&p| p > 0)),
+        nodegroup,
+        china,
+        fangyu,
+        udp,
+        toowhite: detail.and_then(|d| d.toowhite),
+        load1: detail.map(|d| d.load1),
+        load5: detail.map(|d| d.load5),
+        load15: detail.map(|d| d.load15),
+        bandwidth_usage_percent: detail.map(|d| d.bandwidth_usage_percent),
+        notes,
+        tags: Vec::new(),
+        policy: NodePolicyFlags::default(),
+        quarantined_until: None,
+    };
+    summary.classify();
+    summary
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct NodeListItem {
     id: i64,
@@ -705,6 +737,16 @@ struct NodeListItem {
     web: String,
     #[serde(default)]
     state: String,
+    #[serde(default)]
+    notes: String,
+    #[serde(default)]
+    nodegroup: String,
+    #[serde(default)]
+    china: String,
+    #[serde(default)]
+    fangyu: String,
+    #[serde(default)]
+    udp: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -726,9 +768,25 @@ pub struct NodeInfo {
     #[serde(default)]
     pub load1: f64,
     #[serde(default)]
+    pub load5: f64,
+    #[serde(default)]
+    pub load15: f64,
+    #[serde(default)]
     pub bandwidth_usage_percent: f64,
     #[serde(default)]
     pub web: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub nodegroup: String,
+    #[serde(default)]
+    pub china: String,
+    #[serde(default)]
+    pub fangyu: String,
+    #[serde(default)]
+    pub udp: String,
+    #[serde(default)]
+    pub toowhite: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

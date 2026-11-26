@@ -31,6 +31,8 @@ impl Default for ProbeSettings {
 #[derive(Debug, Clone)]
 pub struct ProbeResult {
     pub node: NodeSummary,
+    /// Actual TCP port probed (`node.frps_port` if known, else `settings.probe_port`).
+    pub probed_port: u16,
     /// Average RTT in milliseconds over `PROBE_ATTEMPTS` attempts.
     /// `None` means all attempts timed out or the node has no known IP.
     pub avg_rtt_ms: Option<f64>,
@@ -52,17 +54,19 @@ pub async fn probe_and_rank(
     }
 
     let timeout_dur = Duration::from_millis(settings.probe_timeout_ms);
-    let port = settings.probe_port;
+    let default_port = settings.probe_port;
 
-    // Fan out: one task per node.
+    // Fan out: one task per node, using each node's real frps_port when known.
     let handles: Vec<_> = nodes
         .iter()
         .map(|node| {
             let node = node.clone();
+            let port = node.frps_port.filter(|&p| p > 0).unwrap_or(default_port);
             tokio::spawn(async move {
                 let avg = probe_node(&node, port, timeout_dur).await;
                 ProbeResult {
                     node,
+                    probed_port: port,
                     avg_rtt_ms: avg,
                 }
             })
@@ -146,8 +150,19 @@ mod tests {
             state: "online".into(),
             real_ip: None,
             host: host.map(str::to_owned),
+            frps_port: Some(7002),
+            nodegroup: None,
+            china: None,
+            fangyu: None,
+            udp: None,
+            toowhite: None,
             load1: None,
+            load5: None,
+            load15: None,
             bandwidth_usage_percent: None,
+            notes: String::new(),
+            tags: Vec::new(),
+            policy: Default::default(),
             quarantined_until: None,
         }
     }
@@ -157,14 +172,17 @@ mod tests {
         let mut results = [
             ProbeResult {
                 node: node("slow", None),
+                probed_port: 7000,
                 avg_rtt_ms: None,
             },
             ProbeResult {
                 node: node("fast", None),
+                probed_port: 7002,
                 avg_rtt_ms: Some(10.0),
             },
             ProbeResult {
                 node: node("mid", None),
+                probed_port: 7000,
                 avg_rtt_ms: Some(50.0),
             },
         ];

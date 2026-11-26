@@ -6,7 +6,7 @@ use ashan_frp_domain::{
     FaultDomain, FrpcEvent, FrpcEventType, ProviderSettingsUpdate, ProviderSettingsView,
     RoutingPhase, TunnelPlan,
 };
-use ashan_frp_failover::ordered_candidates;
+use ashan_frp_failover::{CandidatePolicy, ordered_candidates_with_policy};
 use ashan_frp_frpc_runtime::ReadinessError;
 use ashan_frp_node_probe::{ProbeSettings, probe_and_rank};
 use sha2::{Digest, Sha256};
@@ -307,17 +307,24 @@ impl Coordinator {
         for node in &mut nodes {
             node.quarantined_until = self.state.db.quarantine_until(&node.name).await?;
         }
+        let settings = self.state.db.provider_settings().await?;
+        let policy = CandidatePolicy {
+            require_web,
+            require_high_bandwidth: settings.probe_require_high_bandwidth,
+            exclude_icp_required: settings.probe_exclude_icp_required,
+            exclude_whitelist_and_ban_overseas: settings.probe_exclude_whitelist_and_ban_overseas,
+            max_load1: settings.probe_max_load1,
+        };
         let candidates =
-            ordered_candidates(&old, routing.standby_node.as_deref(), &nodes, require_web);
+            ordered_candidates_with_policy(&old, routing.standby_node.as_deref(), &nodes, &policy);
         if candidates.is_empty() {
             if trigger.is_none() {
                 self.state.db.set_routing_phase(RoutingPhase::Idle).await?;
             }
-            return Err(anyhow!("no eligible standby node"));
+            return Err(anyhow!("no eligible standby node matching policy"));
         }
 
-        // ── Latency probe: sort candidates by TCP RTT ──────────────────────────
-        let settings = self.state.db.provider_settings().await?;
+        // ── Latency probe: sort candidates by TCP RTT on each node's real frps_port ──
         let probe_cfg = ProbeSettings {
             probe_port: settings.probe_port.clamp(1, 65535) as u16,
             probe_timeout_ms: settings.probe_timeout_ms.max(100) as u64,

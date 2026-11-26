@@ -2,6 +2,7 @@
 
 ## 0.4.1 - 2026-11-26
 
+- Add real-port node intelligence (`frps_port` from `/nodeinfo`, `notes`, `nodegroup`, `china`, `fangyu`, `load1/5/15`, `bandwidth_usage_percent`) and structured capability/stability tags (`可建站`, `大带宽`/`AS4837`/`10G`, `禁网盘/大流量`, `被攻击/不可用`, `高负载`, `需备案`, `需过白`, `封海外`, `有防御`), plus migration `0006_node_policy_settings.sql` for latency-first + drive/bandwidth-compatible candidate filtering.
 - Add multi-method ChmlFrp authentication via Qzhua OAuth2 SSO + RFC 6238 TOTP 2FA (`POST /api/v1/settings/providers/chmlfrp/sso/login`) and automatic `/sso/refresh` renewal with `Authorization: Bearer` API alignment (plus migration `0005_chmlfrp_multi_auth.sql`).
 - Add `crates/node-probe` for concurrent TCP RTT probing across eligible ChmlFrp nodes (3 connect attempts per node, averaged RTT, configurable port/timeout/tolerance).
 - Integrate latency-first ranking (`sort_by_latency`) into global failover after filtering by online status, quarantine, and `web_supported` (when any enabled HTTP/HTTPS tunnel exists).

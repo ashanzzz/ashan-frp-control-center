@@ -32,6 +32,10 @@ pub struct ProviderSettings {
     pub probe_port: i64,
     pub probe_timeout_ms: i64,
     pub probe_latency_tolerance_ms: i64,
+    pub probe_require_high_bandwidth: bool,
+    pub probe_exclude_icp_required: bool,
+    pub probe_exclude_whitelist_and_ban_overseas: bool,
+    pub probe_max_load1: f64,
 }
 
 impl ProviderSettings {
@@ -51,6 +55,10 @@ impl ProviderSettings {
             probe_port: self.probe_port.clamp(1, 65535) as u16,
             probe_timeout_ms: self.probe_timeout_ms.max(100) as u64,
             probe_latency_tolerance_ms: self.probe_latency_tolerance_ms.max(0) as u64,
+            probe_require_high_bandwidth: self.probe_require_high_bandwidth,
+            probe_exclude_icp_required: self.probe_exclude_icp_required,
+            probe_exclude_whitelist_and_ban_overseas: self.probe_exclude_whitelist_and_ban_overseas,
+            probe_max_load1: self.probe_max_load1,
         }
     }
 }
@@ -94,7 +102,9 @@ impl Database {
             "SELECT chmlfrp_base_url,chmlfrp_token,chmlfrp_refresh_token,chmlfrp_token_expires_at,\
              chmlfrp_username,chmlfrp_password,chmlfrp_totp_secret,\
              cloudflare_api_base,cloudflare_api_token,cloudflare_zone_id,updated_at,\
-             probe_port,probe_timeout_ms,probe_latency_tolerance_ms \
+             probe_port,probe_timeout_ms,probe_latency_tolerance_ms,\
+             probe_require_high_bandwidth,probe_exclude_icp_required,\
+             probe_exclude_whitelist_and_ban_overseas,probe_max_load1 \
              FROM provider_settings WHERE singleton_id=1",
         )
         .fetch_one(&self.pool)
@@ -114,6 +124,12 @@ impl Database {
             probe_port: row.get("probe_port"),
             probe_timeout_ms: row.get("probe_timeout_ms"),
             probe_latency_tolerance_ms: row.get("probe_latency_tolerance_ms"),
+            probe_require_high_bandwidth: row.get::<i64, _>("probe_require_high_bandwidth") != 0,
+            probe_exclude_icp_required: row.get::<i64, _>("probe_exclude_icp_required") != 0,
+            probe_exclude_whitelist_and_ban_overseas: row
+                .get::<i64, _>("probe_exclude_whitelist_and_ban_overseas")
+                != 0,
+            probe_max_load1: row.get("probe_max_load1"),
         })
     }
 
@@ -260,6 +276,8 @@ impl Database {
              chmlfrp_username=?,chmlfrp_password=?,chmlfrp_totp_secret=?,\
              cloudflare_api_base=?,cloudflare_api_token=?,cloudflare_zone_id=?,\
              probe_port=?,probe_timeout_ms=?,probe_latency_tolerance_ms=?,\
+             probe_require_high_bandwidth=?,probe_exclude_icp_required=?,\
+             probe_exclude_whitelist_and_ban_overseas=?,probe_max_load1=?,\
              env_bootstrap_complete=1,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
         )
         .bind(input.chmlfrp_base_url.trim().trim_end_matches('/'))
@@ -275,6 +293,10 @@ impl Database {
         .bind(input.probe_port as i64)
         .bind(input.probe_timeout_ms as i64)
         .bind(input.probe_latency_tolerance_ms as i64)
+        .bind(input.probe_require_high_bandwidth as i64)
+        .bind(input.probe_exclude_icp_required as i64)
+        .bind(input.probe_exclude_whitelist_and_ban_overseas as i64)
+        .bind(input.probe_max_load1.max(0.5))
         .execute(&self.pool)
         .await?;
         self.provider_settings().await
