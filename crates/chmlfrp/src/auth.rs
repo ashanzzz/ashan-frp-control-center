@@ -174,12 +174,18 @@ pub async fn login_via_qzhua_sso(
         .await
         .context("GET Qzhua oauth2/authorize")?;
     let loc2 = redirect_location(&resp2).unwrap_or_default();
-    if loc2.contains("/sso/callback") {
+    // Use path-based check: /sso/callback must be the actual URL path, not just a substring
+    // that appears in URL-encoded params (e.g. redirect_uri=/sso/callback in query string).
+    if url_path_is_sso_callback(&loc2) {
         return finish_sso_callback(&http, &loc2).await;
     }
 
     let auth_origin =
         origin_of(&oauth_url).unwrap_or_else(|| "https://account-api.qzhua.net".into());
+
+    // Normalize loc2: if relative, prepend auth_origin; if http, upgrade to https.
+    let loc2 = normalize_redirect_url(&loc2, &auth_origin);
+
     let continue_param = Url::parse(&loc2).ok().and_then(|u| {
         u.query_pairs()
             .find(|(k, _)| k == "continue")
@@ -222,14 +228,15 @@ pub async fn login_via_qzhua_sso(
         let body = resp4.text().await.unwrap_or_default();
         bail!("轻爪账号登录被拒绝 ({status4}): {body}");
     }
-    if loc4.contains("error") {
+    // Check for error in path only, not in query params (which may contain encoded URLs)
+    if path_contains(&loc4, "error") {
         bail!("轻爪账号或密码错误 (redirect: {loc4})");
     }
 
     // 5. Handle MFA (TOTP) if redirected to /mfa or MFA status reports unverified.
-    let next_url = if loc4.contains("/mfa") {
+    let next_url = if path_contains(&loc4, "/mfa") {
         verify_qzhua_totp(&http, &auth_origin, totp_secret).await?
-    } else if loc4.contains("/oauth2/authorize") || loc4.contains("/sso/callback") {
+    } else if path_contains(&loc4, "/oauth2/authorize") || url_path_is_sso_callback(&loc4) {
         loc4
     } else {
         // Double-check MFA status explicitly in case redirect omits /mfa.
@@ -256,7 +263,7 @@ pub async fn login_via_qzhua_sso(
     };
 
     // 6. Follow oauth2/authorize -> sso/callback -> panel.chmlfrp.net/home#access_token=...
-    if next_url.contains("/sso/callback") {
+    if url_path_is_sso_callback(&next_url) {
         return finish_sso_callback(&http, &next_url).await;
     }
 
@@ -272,7 +279,7 @@ pub async fn login_via_qzhua_sso(
         )
     })?;
 
-    if !callback_url.contains("/sso/callback") {
+    if !url_path_is_sso_callback(&callback_url) {
         bail!("OAuth2 重定向目标异常: {callback_url}");
     }
 
@@ -373,6 +380,38 @@ fn origin_of(url: &str) -> Option<String> {
         Some(port) => Some(format!("{}://{host}:{port}", parsed.scheme())),
         None => Some(format!("{}://{host}", parsed.scheme())),
     }
+}
+
+/// True iff the URL's **path** (not query string or fragment) ends with `/sso/callback`.
+fn url_path_is_sso_callback(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .map(|u| u.path().ends_with("/sso/callback"))
+        .unwrap_or(false)
+}
+
+/// True iff the URL's **path** contains `segment`.
+fn path_contains(url: &str, segment: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .map(|u| u.path().contains(segment))
+        .unwrap_or_else(|| url.contains(segment))
+}
+
+/// Normalize a redirect Location header value:
+/// - Relative paths are prefixed with `auth_origin`.
+/// - `http://` is upgraded to `https://` to match TLS expectations.
+fn normalize_redirect_url(loc: &str, auth_origin: &str) -> String {
+    if loc.starts_with('/') {
+        // Relative path — prepend origin (always use HTTPS origin)
+        let https_origin = auth_origin.replace("http://", "https://");
+        return format!("{https_origin}{loc}");
+    }
+    // Upgrade http to https if the host matches auth_origin
+    if loc.starts_with("http://") {
+        return loc.replacen("http://", "https://", 1);
+    }
+    loc.to_owned()
 }
 
 /// Extract `access_token`, `refresh_token`, `expires_in`, and `expires_at` from
