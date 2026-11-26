@@ -34,18 +34,24 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "ashan-frp-chmlfrp"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "ashan-frp-domain",
+ "regex",
  "reqwest",
+ "rustls-pki-types",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-root-certs",
 ]
 
 [[package]]
 name = "ashan-frp-cloudflare"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -55,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-database"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "ashan-frp-domain",
@@ -66,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-domain"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "serde",
@@ -75,14 +81,14 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-failover"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ashan-frp-domain",
 ]
 
 [[package]]
 name = "ashan-frp-frpc-log"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ashan-frp-domain",
  "chrono",
@@ -90,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "ashan-frp-frpc-runtime"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "ashan-frp-domain",
@@ -102,8 +108,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ashan-frp-node-probe"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "ashan-frp-domain",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ashan-frp-server"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "ashan-frp-chmlfrp",
@@ -113,6 +129,7 @@ dependencies = [
  "ashan-frp-failover",
  "ashan-frp-frpc-log",
  "ashan-frp-frpc-runtime",
+ "ashan-frp-node-probe",
  "axum",
  "futures-util",
  "hex",
@@ -1393,6 +1410,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1484,6 +1513,7 @@ checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",

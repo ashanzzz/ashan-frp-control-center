@@ -271,15 +271,21 @@ function renderChmlfrp() {
     if (d.routing.active_node === node.name) role = simpleBadge("ACTIVE", "ok");
     else if (d.routing.standby_node === node.name) role = simpleBadge("STANDBY", "warn");
     const quarantine = node.quarantined_until ? `${simpleBadge("隔离", "bad")} ${esc(node.quarantined_until)} <button data-unquarantine="${esc(node.name)}">解除</button>` : "—";
-    return `<tr><td><strong>${esc(node.name)}</strong><small>${esc(node.area)}</small></td><td>${esc(node.real_ip || "—")}</td><td>${esc(node.state)}</td><td>${role}</td><td>${quarantine}</td></tr>`;
+    const probeResult = state.probeResults?.find((r) => r.node_name === node.name);
+    const rttCell = probeResult
+      ? probeResult.avg_rtt_ms === null
+        ? simpleBadge("超时", "bad")
+        : `${probeResult.fastest ? simpleBadge("最快", "ok") + " " : ""}${Number(probeResult.avg_rtt_ms).toFixed(1)} ms`
+      : "—";
+    return `<tr><td><strong>${esc(node.name)}</strong><small>${esc(node.area)}</small></td><td>${esc(node.real_ip || "—")}</td><td>${esc(node.state)}</td><td>${role}</td><td>${rttCell}</td><td>${quarantine}</td></tr>`;
   }).join("");
   return `<div class="provider-console-head"><div><h2>ChmlFrp API</h2><p>${esc(d.chmlfrp_health.message)}</p></div>${simpleBadge(connected ? "Connected" : (p?.chmlfrp_token_configured ? "Disconnected" : "未配置"), connected ? "ok" : (p?.chmlfrp_token_configured ? "bad" : ""))}</div>
-    <div class="actions resource-toolbar"><button id="chml-refresh">刷新资源</button><button id="chml-diag">API 诊断</button><button id="chml-create" ${connected ? "" : "disabled"}>+ 创建 ChmlFrp 隧道</button>${!connected ? `<button data-goto="settings">前往设置</button>` : ""}</div>
+    <div class="actions resource-toolbar"><button id="chml-refresh">刷新资源</button><button id="chml-diag">API 诊断</button><button id="chml-create" ${connected ? "" : "disabled"}>+ 创建 ChmlFrp 隧道</button><button id="probe-nodes-btn" ${connected ? "" : "disabled"} title="对在线节点并发 TCP 探针，测量到 frpc 端口的延迟">测量全部节点</button>${!connected ? `<button data-goto="settings">前往设置</button>` : ""}</div>
     ${renderDiagnostics(state.chmlDiagnostics, "chml")}
     <h2 class="section-title">远端隧道 <span class="count-pill">${state.remoteTunnels.length}</span></h2>
     <div class="table-wrap"><table><thead><tr><th>隧道</th><th>节点</th><th>协议</th><th>本地</th><th>外部</th><th>状态</th><th>纳管</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">${connected ? "未读取到隧道" : "请先配置 ChmlFrp"}</td></tr>`}</tbody></table></div>
     <div class="section-separator"></div><h2 class="section-title">节点 <span class="count-pill">${state.nodes.length}</span></h2>
-    <div class="table-wrap"><table><thead><tr><th>节点</th><th>真实 IP</th><th>状态</th><th>角色</th><th>隔离</th></tr></thead><tbody>${nodeRows || `<tr><td colspan="5" class="muted">暂无节点数据</td></tr>`}</tbody></table></div>`;
+    <div class="table-wrap"><table><thead><tr><th>节点</th><th>真实 IP</th><th>状态</th><th>角色</th><th>探针延迟</th><th>隔离</th></tr></thead><tbody>${nodeRows || `<tr><td colspan="6" class="muted">暂无节点数据</td></tr>`}</tbody></table></div>`;
 }
 
 function renderDns() {
@@ -348,6 +354,15 @@ function renderSettings() {
       ${providerFeedbackHtml("chmlfrp", chmlStatus.message)}
       <div class="provider-actions"><button type="button" id="chml-test">测试连接</button><button type="button" id="chml-save">保存并立即验证</button>${p.chmlfrp_token_configured ? `<button type="button" id="chml-clear" class="danger">清除 Token</button>` : ""}<a class="button-link" href="https://panel.chmlfrp.net/" target="_blank" rel="noopener noreferrer">打开 ChmlFrp 官方面板获取 API Token</a></div>
       <p class="provider-note">不要粘贴包含 access_token / refresh_token 的完整浏览器授权 URL；这里需要 ChmlFrp API Token。</p>
+    </section>
+    <section class="settings-card"><div class="settings-card-head"><div><h2>节点延迟探针</h2><p>Failover 时对候选节点并发 TCP 探针，选延迟最低节点。</p></div></div>
+      <div class="form-grid">
+        <label>探针端口 (frpc 监听端口)<input id="probe-port" type="number" min="1" max="65535" value="${esc(p.probe_port ?? 7000)}"></label>
+        <label>单次连接超时 (ms)<input id="probe-timeout" type="number" min="100" max="30000" value="${esc(p.probe_timeout_ms ?? 2000)}"></label>
+        <label>STANDBY 容忍带 (ms)<input id="probe-tolerance" type="number" min="0" max="5000" value="${esc(p.probe_latency_tolerance_ms ?? 50)}"></label>
+      </div>
+      <div class="provider-actions"><button type="button" id="probe-settings-save">保存探针设置</button></div>
+      <p class="provider-note">探针通过 TCP 连接节点 IP 的 frpc 端口测量延迟（3次取平均）。STANDBY 容忍带：当 STANDBY 延迟 ≤ 最优 + 容忍带时，保持 STANDBY 优先。</p>
     </section>
     <section class="settings-card"><div class="settings-card-head"><div><h2>Cloudflare</h2><p>保存 Token/Zone 后立即验证；DNS 资源操作在“DNS”页面完成。</p></div>${cfBadge}</div>
       <label>API Base URL<input id="cf-base" value="${esc(p.cloudflare_api_base)}" autocomplete="off" spellcheck="false"></label>
@@ -514,6 +529,13 @@ function bindPageActions() {
   $("#refresh-tunnels")?.addEventListener("click", async () => { await loadRemoteTunnels(); render(); });
   $("#chml-refresh")?.addEventListener("click", async () => { await Promise.all([loadRemoteTunnels(), loadNodes(), refresh()]); render(); });
   $("#chml-create")?.addEventListener("click", () => openRemoteTunnel());
+  $("#probe-nodes-btn")?.addEventListener("click", async () => {
+    try {
+      setAlert("正在探针所有在线节点延迟，请稍候…", "info");
+      state.probeResults = await api("/api/v1/nodes/probe", { method: "POST" });
+      render();
+    } catch (error) { setAlert("节点探针失败：" + error.message); }
+  });
   $("#chml-diag")?.addEventListener("click", async () => {
     try { state.chmlDiagnostics = await api("/api/v1/chmlfrp/diagnostics", { method: "POST" }); render(); } catch (error) { setAlert(error.message); }
   });
@@ -574,6 +596,7 @@ function bindPageActions() {
   document.querySelectorAll("[data-frpc]").forEach((button) => button.addEventListener("click", async () => {
     try { await api(`/api/v1/frpc/${button.dataset.frpc}`, { method: "POST" }); await Promise.all([refresh(), loadLogs()]); render(); } catch (error) { setAlert(error.message); }
   }));
+  $("#probe-settings-save")?.addEventListener("click", saveProbeSettings);
   $("#routing-form")?.addEventListener("submit", saveRouting);
   $("#chml-test")?.addEventListener("click", () => testChmlFrp());
   $("#chml-save")?.addEventListener("click", saveChmlFrpSettings);
@@ -627,7 +650,10 @@ async function testChmlFrp(useInputs = true) {
 
 async function saveChmlFrpSettings() {
   const p = state.providerSettings;
-  const body = { chmlfrp_base_url: $("#chml-base").value.trim(), chmlfrp_token: $("#chml-token").value.trim() || null, clear_chmlfrp_token: false, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id };
+  const probePort = Number($("#probe-port")?.value || p.probe_port || 7000);
+  const probeTimeout = Number($("#probe-timeout")?.value || p.probe_timeout_ms || 2000);
+  const probeTolerance = Number($("#probe-tolerance")?.value ?? p.probe_latency_tolerance_ms ?? 50);
+  const body = { chmlfrp_base_url: $("#chml-base").value.trim(), chmlfrp_token: $("#chml-token").value.trim() || null, clear_chmlfrp_token: false, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id, probe_port: probePort, probe_timeout_ms: probeTimeout, probe_latency_tolerance_ms: probeTolerance };
   try {
     setProviderFeedback("chmlfrp", "正在保存配置…");
     state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });
@@ -639,10 +665,25 @@ async function saveChmlFrpSettings() {
   } catch (error) { setProviderFeedback("chmlfrp", `保存失败：${error.message}`, "bad"); }
 }
 
+async function saveProbeSettings() {
+  const p = state.providerSettings;
+  const probePort = Number($("#probe-port").value);
+  const probeTimeout = Number($("#probe-timeout").value);
+  const probeTolerance = Number($("#probe-tolerance").value);
+  if (!probePort || probePort < 1 || probePort > 65535) { setAlert("探针端口必须在 1-65535 之间"); return; }
+  if (!probeTimeout || probeTimeout < 100) { setAlert("超时不能小于 100ms"); return; }
+  const body = { chmlfrp_base_url: p.chmlfrp_base_url, chmlfrp_token: null, clear_chmlfrp_token: false, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id, probe_port: probePort, probe_timeout_ms: probeTimeout, probe_latency_tolerance_ms: probeTolerance };
+  try {
+    state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });
+    setAlert("探针设置已保存。", "info");
+    render();
+  } catch (error) { setAlert("保存探针设置失败：" + error.message); }
+}
+
 async function clearChmlFrpToken() {
   if (!(await confirmAction("清除 ChmlFrp Token", "清除后 ChmlFrp 资源管理、同步和故障切换不可用，直到重新配置。继续？"))) return;
   const p = state.providerSettings;
-  const body = { chmlfrp_base_url: $("#chml-base").value.trim(), chmlfrp_token: null, clear_chmlfrp_token: true, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id };
+  const body = { chmlfrp_base_url: $("#chml-base").value.trim(), chmlfrp_token: null, clear_chmlfrp_token: true, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id, probe_port: p.probe_port ?? 7000, probe_timeout_ms: p.probe_timeout_ms ?? 2000, probe_latency_tolerance_ms: p.probe_latency_tolerance_ms ?? 50 };
   try { state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) }); state.providerFeedback.chmlfrp = { message: "ChmlFrp Token 已清除", kind: "ok" }; await refresh(); state.nodes = []; state.remoteTunnels = []; render(); } catch (error) { setProviderFeedback("chmlfrp", error.message, "bad"); }
 }
 
@@ -675,7 +716,7 @@ async function testCloudflare(useInputs = true) {
 
 async function saveCloudflareSettings() {
   const p = state.providerSettings;
-  const body = { chmlfrp_base_url: p.chmlfrp_base_url, chmlfrp_token: null, clear_chmlfrp_token: false, cloudflare_api_base: $("#cf-base").value.trim(), cloudflare_api_token: $("#cf-token").value.trim() || null, clear_cloudflare_api_token: false, cloudflare_zone_id: $("#cf-zone").value.trim() };
+  const body = { chmlfrp_base_url: p.chmlfrp_base_url, chmlfrp_token: null, clear_chmlfrp_token: false, cloudflare_api_base: $("#cf-base").value.trim(), cloudflare_api_token: $("#cf-token").value.trim() || null, clear_cloudflare_api_token: false, cloudflare_zone_id: $("#cf-zone").value.trim(), probe_port: p.probe_port ?? 7000, probe_timeout_ms: p.probe_timeout_ms ?? 2000, probe_latency_tolerance_ms: p.probe_latency_tolerance_ms ?? 50 };
   try {
     setProviderFeedback("cloudflare", "正在保存配置…");
     state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });
@@ -691,7 +732,7 @@ async function saveCloudflareSettings() {
 async function clearCloudflareToken() {
   if (!(await confirmAction("清除 Cloudflare Token", "清除后 DNS 读取、CRUD 和 HA DNS 切换不可用。继续？"))) return;
   const p = state.providerSettings;
-  const body = { chmlfrp_base_url: p.chmlfrp_base_url, chmlfrp_token: null, clear_chmlfrp_token: false, cloudflare_api_base: $("#cf-base").value.trim(), cloudflare_api_token: null, clear_cloudflare_api_token: true, cloudflare_zone_id: $("#cf-zone").value.trim() };
+  const body = { chmlfrp_base_url: p.chmlfrp_base_url, chmlfrp_token: null, clear_chmlfrp_token: false, cloudflare_api_base: $("#cf-base").value.trim(), cloudflare_api_token: null, clear_cloudflare_api_token: true, cloudflare_zone_id: $("#cf-zone").value.trim(), probe_port: p.probe_port ?? 7000, probe_timeout_ms: p.probe_timeout_ms ?? 2000, probe_latency_tolerance_ms: p.probe_latency_tolerance_ms ?? 50 };
   try { state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) }); state.providerFeedback.cloudflare = { message: "Cloudflare Token 已清除", kind: "ok" }; state.dnsRecords = []; await refresh(); render(); } catch (error) { setProviderFeedback("cloudflare", error.message, "bad"); }
 }
 

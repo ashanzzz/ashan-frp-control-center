@@ -1,5 +1,13 @@
 use ashan_frp_domain::NodeSummary;
 
+/// A latency probe result for one node.
+#[derive(Debug, Clone)]
+pub struct ProbeResult {
+    pub node_name: String,
+    /// Average RTT in milliseconds; None means all probe attempts failed.
+    pub avg_rtt_ms: Option<f64>,
+}
+
 pub fn ordered_candidates(
     active: &str,
     preferred_standby: Option<&str>,
@@ -20,6 +28,70 @@ pub fn ordered_candidates(
         }
     }
     out
+}
+
+/// Sort `candidates` by ascending probe RTT with STANDBY priority protection.
+///
+/// If the preferred standby node's RTT is within `tolerance_ms` of the best RTT,
+/// it is kept at position 0. Otherwise, nodes are ordered by ascending RTT.
+/// Nodes with no probe result (all timeouts) are appended at the end.
+pub fn sort_by_latency(
+    candidates: Vec<NodeSummary>,
+    probe_results: &[ProbeResult],
+    preferred_standby: Option<&str>,
+    tolerance_ms: u64,
+) -> Vec<NodeSummary> {
+    if candidates.is_empty() {
+        return candidates;
+    }
+
+    // Find the minimum RTT among all candidates that have a measurement.
+    let min_rtt = candidates
+        .iter()
+        .filter_map(|n| {
+            probe_results
+                .iter()
+                .find(|p| p.node_name == n.name)
+                .and_then(|p| p.avg_rtt_ms)
+        })
+        .fold(f64::INFINITY, f64::min);
+
+    // Check if STANDBY is eligible for position-0 protection.
+    let standby_protected = preferred_standby.is_some_and(|standby| {
+        candidates.iter().any(|n| n.name == standby)
+            && probe_results
+                .iter()
+                .find(|p| p.node_name == standby)
+                .and_then(|p| p.avg_rtt_ms)
+                .is_some_and(|rtt| rtt <= min_rtt + tolerance_ms as f64)
+    });
+
+    let rtt_of = |name: &str| -> f64 {
+        probe_results
+            .iter()
+            .find(|p| p.node_name == name)
+            .and_then(|p| p.avg_rtt_ms)
+            .unwrap_or(f64::INFINITY)
+    };
+
+    let mut result = candidates;
+    result.sort_by(|a, b| {
+        // If STANDBY is protected, pin it to front.
+        if standby_protected {
+            let a_standby = preferred_standby == Some(a.name.as_str());
+            let b_standby = preferred_standby == Some(b.name.as_str());
+            if a_standby && !b_standby {
+                return std::cmp::Ordering::Less;
+            }
+            if b_standby && !a_standby {
+                return std::cmp::Ordering::Greater;
+            }
+        }
+        rtt_of(&a.name)
+            .partial_cmp(&rtt_of(&b.name))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    result
 }
 
 pub fn choose_target(
@@ -59,6 +131,13 @@ mod tests {
         }
     }
 
+    fn probe(name: &str, rtt: Option<f64>) -> ProbeResult {
+        ProbeResult {
+            node_name: name.into(),
+            avg_rtt_ms: rtt,
+        }
+    }
+
     #[test]
     fn never_returns_active() {
         assert!(choose_target("A", None, &[node("A")], true).is_none());
@@ -81,5 +160,57 @@ mod tests {
                 .name,
             "B"
         );
+    }
+
+    #[test]
+    fn sort_by_latency_picks_fastest() {
+        let candidates = vec![node("slow"), node("fast"), node("mid")];
+        let probes = vec![
+            probe("slow", Some(100.0)),
+            probe("fast", Some(10.0)),
+            probe("mid", Some(50.0)),
+        ];
+        let result = sort_by_latency(candidates, &probes, None, 50);
+        assert_eq!(result[0].name, "fast");
+        assert_eq!(result[1].name, "mid");
+        assert_eq!(result[2].name, "slow");
+    }
+
+    #[test]
+    fn standby_protected_within_tolerance() {
+        // standby=B at 25ms, best=A at 10ms, tolerance=50ms → 25 ≤ 10+50 → B keeps #1
+        let candidates = vec![node("A"), node("B"), node("C")];
+        let probes = vec![
+            probe("A", Some(10.0)),
+            probe("B", Some(25.0)),
+            probe("C", Some(15.0)),
+        ];
+        let result = sort_by_latency(candidates, &probes, Some("B"), 50);
+        assert_eq!(result[0].name, "B");
+    }
+
+    #[test]
+    fn standby_bypassed_outside_tolerance() {
+        // standby=B at 80ms, best=A at 10ms, tolerance=50ms → 80 > 10+50 → A is #1
+        let candidates = vec![node("A"), node("B"), node("C")];
+        let probes = vec![
+            probe("A", Some(10.0)),
+            probe("B", Some(80.0)),
+            probe("C", Some(15.0)),
+        ];
+        let result = sort_by_latency(candidates, &probes, Some("B"), 50);
+        assert_eq!(result[0].name, "A");
+    }
+
+    #[test]
+    fn timeout_nodes_sorted_to_end() {
+        let candidates = vec![node("A"), node("timeout_node"), node("B")];
+        let probes = vec![
+            probe("A", Some(50.0)),
+            probe("timeout_node", None),
+            probe("B", Some(30.0)),
+        ];
+        let result = sort_by_latency(candidates, &probes, None, 50);
+        assert_eq!(result[2].name, "timeout_node");
     }
 }

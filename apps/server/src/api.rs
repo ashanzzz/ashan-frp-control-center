@@ -9,6 +9,7 @@ use ashan_frp_domain::{
     ApiResponse, DashboardSnapshot, ErrorResponse, ProviderHealth, ProviderSettingsUpdate,
     ProviderSettingsView, RoutingUpdate, TunnelPlan, TunnelPlanInput,
 };
+use ashan_frp_node_probe::{ProbeSettings, probe_and_rank};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -46,6 +47,10 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
         .route(
             "/api/v1/settings/providers/test/chmlfrp",
             post(test_chmlfrp),
+        )
+        .route(
+            "/api/v1/settings/providers/chmlfrp/email/bootstrap",
+            post(bootstrap_chmlfrp_by_email),
         )
         .route(
             "/api/v1/settings/providers/test/cloudflare",
@@ -86,6 +91,7 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
         .route("/api/v1/dns/diagnostics", post(dns_diagnostics))
         .route("/api/v1/nodes", get(nodes))
         .route("/api/v1/nodes/{name}/unquarantine", post(unquarantine_node))
+        .route("/api/v1/nodes/probe", post(probe_nodes))
         .route("/api/v1/reconcile", post(reconcile_all))
         .route("/api/v1/failover", post(manual_failover))
         .route("/api/v1/frpc/status", get(frpc_status))
@@ -118,6 +124,14 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             code: "RESOURCE_CONFLICT",
+            message: message.into(),
+        }
+    }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "BAD_GATEWAY",
             message: message.into(),
         }
     }
@@ -366,6 +380,61 @@ async fn test_chmlfrp(
             "tunnels": tunnels.len(),
         }),
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChmlEmailBootstrapInput {
+    #[serde(default)]
+    code: Option<String>,
+}
+
+async fn bootstrap_chmlfrp_by_email(
+    State(state): State<ApiState>,
+    Json(input): Json<ChmlEmailBootstrapInput>,
+) -> ApiResult<ProviderSettingsView> {
+    let saved = state.app.db.provider_settings().await?;
+
+    let code = match input.code {
+        Some(c) if !c.trim().is_empty() => c.trim().to_string(),
+        _ => state
+            .app
+            .chml
+            .fetch_email_verification_code()
+            .await
+            .map_err(|error| ApiError::bad_gateway(format!("邮箱验证码自动提取失败: {error}")))?,
+    };
+
+    let identity = state
+        .app
+        .chml
+        .bootstrap_token_via_email_code(&code)
+        .await
+        .map_err(|error| ApiError::bad_gateway(format!("ChmlFrp 验证码认证失败: {error}")))?;
+
+    let update = ProviderSettingsUpdate {
+        chmlfrp_base_url: saved.chmlfrp_base_url,
+        chmlfrp_token: Some(identity.api_token),
+        clear_chmlfrp_token: false,
+        cloudflare_api_base: saved.cloudflare_api_base,
+        cloudflare_api_token: None,
+        clear_cloudflare_api_token: false,
+        cloudflare_zone_id: saved.cloudflare_zone_id,
+        probe_port: saved.probe_port.clamp(1, 65535) as u16,
+        probe_timeout_ms: saved.probe_timeout_ms.max(100) as u64,
+        probe_latency_tolerance_ms: saved.probe_latency_tolerance_ms.max(0) as u64,
+    };
+
+    let view = match state.coordinator.apply_provider_settings(&update).await {
+        Ok(view) => view,
+        Err(ProviderSettingsApplyError::Busy) => {
+            return Err(ApiError::conflict(
+                "全局同步/故障切换正在运行，请在操作结束后再更新 Token",
+            ));
+        }
+        Err(ProviderSettingsApplyError::Other(error)) => return Err(ApiError::from(error)),
+    };
+
+    Ok(Json(ApiResponse { data: view }))
 }
 
 async fn test_cloudflare(
@@ -1297,4 +1366,59 @@ async fn events(
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     )
+}
+
+/// POST /api/v1/nodes/probe
+/// Probe all online non-quarantined ChmlFrp nodes for TCP latency.
+/// Requires ChmlFrp token to be configured.
+async fn probe_nodes(State(state): State<ApiState>) -> ApiResult<serde_json::Value> {
+    if !state.app.chml.configured() {
+        return Err(ApiError::bad_request("ChmlFrp token not configured"));
+    }
+    let mut nodes = state.app.chml.list_nodes().await?;
+    for node in &mut nodes {
+        node.quarantined_until = state.app.db.quarantine_until(&node.name).await?;
+    }
+    let settings = state.app.db.provider_settings().await?;
+    let probe_cfg = ProbeSettings {
+        probe_port: settings.probe_port.clamp(1, 65535) as u16,
+        probe_timeout_ms: settings.probe_timeout_ms.max(100) as u64,
+        probe_latency_tolerance_ms: settings.probe_latency_tolerance_ms.max(0) as u64,
+    };
+    // Only probe online, non-quarantined nodes.
+    let candidates: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.state.eq_ignore_ascii_case("online") && n.quarantined_until.is_none())
+        .cloned()
+        .collect();
+    let results = probe_and_rank(&candidates, &probe_cfg)
+        .await
+        .unwrap_or_else(|_| {
+            candidates
+                .iter()
+                .map(|n| ashan_frp_node_probe::ProbeResult {
+                    node: n.clone(),
+                    avg_rtt_ms: None,
+                })
+                .collect()
+        });
+    let best_rtt = results
+        .iter()
+        .filter_map(|r| r.avg_rtt_ms)
+        .fold(f64::INFINITY, f64::min);
+    let data: Vec<_> = results
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "node_name": r.node.name,
+                "area": r.node.area,
+                "web_supported": r.node.web_supported,
+                "avg_rtt_ms": r.avg_rtt_ms,
+                "fastest": r.avg_rtt_ms.is_some_and(|rtt| (rtt - best_rtt).abs() < 0.001),
+            })
+        })
+        .collect();
+    Ok(Json(ApiResponse {
+        data: serde_json::json!(data),
+    }))
 }

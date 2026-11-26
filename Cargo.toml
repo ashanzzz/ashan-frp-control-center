@@ -9,10 +9,11 @@ members = [
   "crates/frpc-log",
   "crates/frpc-runtime",
   "crates/failover",
+  "crates/node-probe",
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "MIT"
 rust-version = "1.94"
@@ -31,6 +32,10 @@ sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "sqlite-bundled", "macros", "migrate", "chrono"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "sync", "time", "net", "signal"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-pki-types = "1"
+webpki-root-certs = "1"
+regex = "1"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"

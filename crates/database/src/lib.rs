@@ -24,6 +24,9 @@ pub struct ProviderSettings {
     pub cloudflare_api_token: String,
     pub cloudflare_zone_id: String,
     pub updated_at: String,
+    pub probe_port: i64,
+    pub probe_timeout_ms: i64,
+    pub probe_latency_tolerance_ms: i64,
 }
 
 impl ProviderSettings {
@@ -35,6 +38,9 @@ impl ProviderSettings {
             cloudflare_api_token_configured: !self.cloudflare_api_token.trim().is_empty(),
             cloudflare_zone_id: self.cloudflare_zone_id.clone(),
             updated_at: self.updated_at.clone(),
+            probe_port: self.probe_port.clamp(1, 65535) as u16,
+            probe_timeout_ms: self.probe_timeout_ms.max(100) as u64,
+            probe_latency_tolerance_ms: self.probe_latency_tolerance_ms.max(0) as u64,
         }
     }
 }
@@ -76,7 +82,8 @@ impl Database {
     pub async fn provider_settings(&self) -> Result<ProviderSettings> {
         let row = sqlx::query(
             "SELECT chmlfrp_base_url,chmlfrp_token,cloudflare_api_base,cloudflare_api_token,\
-             cloudflare_zone_id,updated_at FROM provider_settings WHERE singleton_id=1",
+             cloudflare_zone_id,updated_at,probe_port,probe_timeout_ms,probe_latency_tolerance_ms \
+             FROM provider_settings WHERE singleton_id=1",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -87,6 +94,9 @@ impl Database {
             cloudflare_api_token: row.get("cloudflare_api_token"),
             cloudflare_zone_id: row.get("cloudflare_zone_id"),
             updated_at: row.get("updated_at"),
+            probe_port: row.get("probe_port"),
+            probe_timeout_ms: row.get("probe_timeout_ms"),
+            probe_latency_tolerance_ms: row.get("probe_latency_tolerance_ms"),
         })
     }
 
@@ -157,6 +167,7 @@ impl Database {
         sqlx::query(
             "UPDATE provider_settings SET chmlfrp_base_url=?,chmlfrp_token=?,\
              cloudflare_api_base=?,cloudflare_api_token=?,cloudflare_zone_id=?,\
+             probe_port=?,probe_timeout_ms=?,probe_latency_tolerance_ms=?,\
              env_bootstrap_complete=1,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
         )
         .bind(input.chmlfrp_base_url.trim().trim_end_matches('/'))
@@ -164,6 +175,9 @@ impl Database {
         .bind(input.cloudflare_api_base.trim().trim_end_matches('/'))
         .bind(cloudflare_api_token)
         .bind(input.cloudflare_zone_id.trim())
+        .bind(input.probe_port as i64)
+        .bind(input.probe_timeout_ms as i64)
+        .bind(input.probe_latency_tolerance_ms as i64)
         .execute(&self.pool)
         .await?;
         self.provider_settings().await

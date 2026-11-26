@@ -8,6 +8,7 @@ use ashan_frp_domain::{
 };
 use ashan_frp_failover::ordered_candidates;
 use ashan_frp_frpc_runtime::ReadinessError;
+use ashan_frp_node_probe::{ProbeSettings, probe_and_rank};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use thiserror::Error;
@@ -308,6 +309,78 @@ impl Coordinator {
             }
             return Err(anyhow!("no eligible standby node"));
         }
+
+        // ── Latency probe: sort candidates by TCP RTT ──────────────────────────
+        let settings = self.state.db.provider_settings().await?;
+        let probe_cfg = ProbeSettings {
+            probe_port: settings.probe_port.clamp(1, 65535) as u16,
+            probe_timeout_ms: settings.probe_timeout_ms.max(100) as u64,
+            probe_latency_tolerance_ms: settings.probe_latency_tolerance_ms.max(0) as u64,
+        };
+        let candidates = match probe_and_rank(&candidates, &probe_cfg).await {
+            Ok(ranked) => {
+                // Convert probe results to failover ProbeResult type for sort_by_latency.
+                let failover_probes: Vec<ashan_frp_failover::ProbeResult> = ranked
+                    .iter()
+                    .map(|r| ashan_frp_failover::ProbeResult {
+                        node_name: r.node.name.clone(),
+                        avg_rtt_ms: r.avg_rtt_ms,
+                    })
+                    .collect();
+                let ordered_nodes: Vec<_> = ranked.iter().map(|r| r.node.clone()).collect();
+                let sorted = ashan_frp_failover::sort_by_latency(
+                    ordered_nodes,
+                    &failover_probes,
+                    routing.standby_node.as_deref(),
+                    probe_cfg.probe_latency_tolerance_ms,
+                );
+                let selected_name = sorted.first().map(|n| n.name.as_str());
+                // Record probe results to Activity for auditability.
+                let probe_detail: Vec<_> = ranked
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "node": r.node.name,
+                            "avg_rtt_ms": r.avg_rtt_ms,
+                            "selected": selected_name == Some(r.node.name.as_str()),
+                        })
+                    })
+                    .collect();
+                let _ = self
+                    .state
+                    .db
+                    .activity(
+                        Some(job),
+                        "failover",
+                        "info",
+                        "节点延迟探针完成，按 RTT 重排候选节点",
+                        None,
+                        selected_name,
+                        serde_json::json!({ "probe_results": probe_detail }),
+                    )
+                    .await;
+                sorted
+            }
+            Err(probe_err) => {
+                let _ = self
+                    .state
+                    .db
+                    .activity(
+                        Some(job),
+                        "failover",
+                        "error",
+                        &format!("节点延迟探针全部失败，failover 已阻断: {probe_err}"),
+                        None,
+                        None,
+                        serde_json::json!({ "error": probe_err.to_string() }),
+                    )
+                    .await;
+                if trigger.is_none() {
+                    self.state.db.set_routing_phase(RoutingPhase::Idle).await?;
+                }
+                return Err(probe_err.context("node latency probe failed — failover aborted"));
+            }
+        };
 
         let mut last_error: Option<anyhow::Error> = None;
         for (idx, target) in candidates.iter().enumerate() {

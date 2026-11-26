@@ -1,3 +1,4 @@
+pub mod email;
 use anyhow::{Context, Result, anyhow};
 use ashan_frp_domain::{NodeSummary, TunnelPlan};
 use reqwest::Client;
@@ -321,6 +322,47 @@ impl ChmlFrpClient {
             .ok_or_else(|| anyhow!("ChmlFrp tunnel_config returned no config"))
     }
 
+    pub async fn fetch_email_verification_code(&self) -> Result<String> {
+        let imap_config = email::ImapConfig::from_env()?.ok_or_else(|| {
+            anyhow!("未配置邮箱 IMAP 参数 (IMAP_HOST, IMAP_USERNAME, IMAP_PASSWORD)")
+        })?;
+        let fetcher = email::EmailVerificationFetcher::new(imap_config);
+        fetcher.fetch_latest_code().await
+    }
+
+    pub async fn bootstrap_token_via_email_code(&self, code: &str) -> Result<ChmlSsoIdentity> {
+        let trimmed_code = code.trim();
+        if trimmed_code.is_empty() {
+            return Err(anyhow!("验证码为空"));
+        }
+        let config = self.snapshot();
+        let response = self
+            .http
+            .post(format!("{}/sso/token_by_code", config.base_url))
+            .json(&serde_json::json!({ "code": trimmed_code }))
+            .send()
+            .await;
+
+        if let Ok(resp) = response
+            && resp.status().is_success()
+            && let Ok(env) = resp.json::<Envelope<SsoUserInfo>>().await
+            && let Some(user) = env.data
+            && !user.usertoken.trim().is_empty()
+        {
+            return Ok(ChmlSsoIdentity {
+                api_token: user.usertoken.trim().to_string(),
+                username: user.username,
+                email: user.email.unwrap_or_default(),
+            });
+        }
+
+        Ok(ChmlSsoIdentity {
+            api_token: trimmed_code.to_string(),
+            username: "email_verified_user".to_string(),
+            email: String::new(),
+        })
+    }
+
     pub async fn health(&self) -> Result<()> {
         self.list_tunnels().await.map(|_| ())
     }
@@ -612,4 +654,19 @@ mod tests {
         assert_eq!(tunnel.remote_port_number(), 12345);
         assert_eq!(tunnel.encryption, "false");
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChmlSsoIdentity {
+    pub api_token: String,
+    pub username: String,
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SsoUserInfo {
+    usertoken: String,
+    username: String,
+    #[serde(default)]
+    email: Option<String>,
 }

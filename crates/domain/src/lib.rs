@@ -224,6 +224,9 @@ pub struct ProviderSettingsView {
     pub cloudflare_api_token_configured: bool,
     pub cloudflare_zone_id: String,
     pub updated_at: String,
+    pub probe_port: u16,
+    pub probe_timeout_ms: u64,
+    pub probe_latency_tolerance_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -239,6 +242,22 @@ pub struct ProviderSettingsUpdate {
     #[serde(default)]
     pub clear_cloudflare_api_token: bool,
     pub cloudflare_zone_id: String,
+    #[serde(default = "default_probe_port")]
+    pub probe_port: u16,
+    #[serde(default = "default_probe_timeout_ms")]
+    pub probe_timeout_ms: u64,
+    #[serde(default = "default_probe_latency_tolerance_ms")]
+    pub probe_latency_tolerance_ms: u64,
+}
+
+fn default_probe_port() -> u16 {
+    7000
+}
+fn default_probe_timeout_ms() -> u64 {
+    2000
+}
+fn default_probe_latency_tolerance_ms() -> u64 {
+    50
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

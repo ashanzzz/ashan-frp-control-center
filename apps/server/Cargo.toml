@@ -14,6 +14,7 @@ ashan-frp-domain = { path = "../../crates/domain" }
 ashan-frp-failover = { path = "../../crates/failover" }
 ashan-frp-frpc-runtime = { path = "../../crates/frpc-runtime" }
 ashan-frp-frpc-log = { path = "../../crates/frpc-log" }
+ashan-frp-node-probe = { path = "../../crates/node-probe" }
 axum.workspace = true
 futures-util.workspace = true
 serde.workspace = true

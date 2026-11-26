@@ -13,6 +13,7 @@ All JSON success responses use `{ "data": ... }`. Errors use `{ "code": "...", "
 - `POST /api/v1/settings/providers/test/cloudflare` verify Cloudflare token and optionally read the selected zone's A records
 - `POST /api/v1/settings/providers/cloudflare/zones` verify a Cloudflare token and list accessible zones
 - `GET /api/v1/nodes` ChmlFrp nodes with quarantine state
+- `POST /api/v1/nodes/probe` concurrently TCP-probe online non-quarantined ChmlFrp nodes and return average RTTs
 - `POST /api/v1/nodes/{name}/unquarantine` clear quarantine eligibility only; never auto-failback
 - `POST /api/v1/reconcile` global desired-state reconciliation
 - `POST /api/v1/failover` manual global failover

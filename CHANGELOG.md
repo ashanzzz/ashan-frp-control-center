@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.1 - 2026-11-26
+
+- Add `crates/node-probe` for concurrent TCP RTT probing across eligible ChmlFrp nodes (3 connect attempts per node, averaged RTT, configurable port/timeout/tolerance).
+- Integrate latency-first ranking (`sort_by_latency`) into global failover after filtering by online status, quarantine, and `web_supported` (when any enabled HTTP/HTTPS tunnel exists).
+- Protect preferred `STANDBY` priority within the configured tolerance band (`probe_latency_tolerance_ms`, default `50 ms`), while automatically promoting faster nodes beyond tolerance.
+- Abort failover cleanly with an explicit Activity error if every candidate node times out on the probe port.
+- Add migration `0004_probe_settings.sql` storing `probe_port` (default `7000`), `probe_timeout_ms` (default `2000`), and `probe_latency_tolerance_ms` (default `50`) in SQLite `provider_settings`.
+- Add `POST /api/v1/nodes/probe` endpoint and WebUI controls: "测量全部节点" button + "探针延迟" column on the ChmlFrp page, and "节点延迟探针" settings card in Settings.
+
+## 0.4.0 - 2026-11-15
+
+- Add Provider Resource Console (ChmlFrp tunnels/nodes, Cloudflare DNS records CRUD & diagnostics, unmanaged resource import/unmanage, and initial global routing bootstrap).
+- Display live `Connected` / `Disconnected` / `需要 Zone` / `未配置` health badges instead of static `Configured`.
+
 ## 0.3.0 - 2026-08-10
 
 - Move ChmlFrp and Cloudflare provider credentials into WebUI-managed SQLite settings under `/data`; Docker environment variables are now optional one-shot bootstrap seeds only, so a WebUI-cleared token cannot reappear after restart.
