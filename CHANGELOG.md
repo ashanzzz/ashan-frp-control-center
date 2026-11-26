@@ -2,6 +2,7 @@
 
 ## 0.4.1 - 2026-11-26
 
+- Add multi-method ChmlFrp authentication via Qzhua OAuth2 SSO + RFC 6238 TOTP 2FA (`POST /api/v1/settings/providers/chmlfrp/sso/login`) and automatic `/sso/refresh` renewal with `Authorization: Bearer` API alignment (plus migration `0005_chmlfrp_multi_auth.sql`).
 - Add `crates/node-probe` for concurrent TCP RTT probing across eligible ChmlFrp nodes (3 connect attempts per node, averaged RTT, configurable port/timeout/tolerance).
 - Integrate latency-first ranking (`sort_by_latency`) into global failover after filtering by online status, quarantine, and `web_supported` (when any enabled HTTP/HTTPS tunnel exists).
 - Protect preferred `STANDBY` priority within the configured tolerance band (`probe_latency_tolerance_ms`, default `50 ms`), while automatically promoting faster nodes beyond tolerance.

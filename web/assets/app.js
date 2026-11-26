@@ -92,12 +92,34 @@ async function loadNodes() {
   catch { state.nodes = []; }
 }
 
+function normalizeRemoteTunnel(t) {
+  if (!t || typeof t !== "object") return t;
+  return {
+    ...t,
+    tunnel_id: t.tunnel_id ?? t.tunnelID ?? t.id ?? "",
+    tunnel_name: t.tunnel_name ?? t.tunnelName ?? t.name ?? "",
+    node: t.node ?? "",
+    local_ip: t.local_ip ?? t.localIP ?? t.localip ?? "",
+    local_port: t.local_port ?? t.localPort ?? t.nport ?? "",
+    remote_endpoint: t.remote_endpoint ?? t.remotePort ?? t.dorp ?? "",
+    port_type: t.port_type ?? t.portType ?? t.type ?? "",
+    band_domain: t.band_domain ?? t.bandDomain ?? null,
+    encryption: t.encryption ?? "false",
+    compression: t.compression ?? "true",
+    extra_params: t.extra_params ?? t.extraParams ?? t.ap ?? "",
+    tunnel_state: t.tunnel_state ?? t.tunnelState ?? t.state ?? "",
+  };
+}
+
 async function loadRemoteTunnels() {
   if (!state.dashboard?.chmlfrp_health?.configured && !state.providerSettings?.chmlfrp_token_configured) {
     state.remoteTunnels = [];
     return;
   }
-  try { state.remoteTunnels = await api("/api/v1/chmlfrp/tunnels"); }
+  try {
+    const raw = await api("/api/v1/chmlfrp/tunnels");
+    state.remoteTunnels = Array.isArray(raw) ? raw.map(normalizeRemoteTunnel) : [];
+  }
   catch (error) { state.remoteTunnels = []; if (state.page === "chmlfrp" || state.page === "tunnels") setAlert(`读取 ChmlFrp 隧道失败：${error.message}`); }
 }
 
@@ -538,6 +560,15 @@ function bindPageActions() {
     try {
       setAlert("正在探针所有在线节点延迟，请稍候…", "info");
       state.probeResults = await api("/api/v1/nodes/probe", { method: "POST" });
+      const reachable = state.probeResults.filter((r) => r.avg_rtt_ms !== null);
+      const fastestWeb = reachable.find((r) => r.web_supported);
+      const fastestAny = reachable[0];
+      const summary = fastestWeb
+        ? `节点延迟探针完成：共测 ${state.probeResults.length} 个在线节点，${reachable.length} 个可达；最快建站节点 ${fastestWeb.node_name} (${Number(fastestWeb.avg_rtt_ms).toFixed(1)} ms)`
+        : fastestAny
+          ? `节点延迟探针完成：共测 ${state.probeResults.length} 个在线节点，${reachable.length} 个可达；最快节点 ${fastestAny.node_name} (${Number(fastestAny.avg_rtt_ms).toFixed(1)} ms)`
+          : "节点延迟探针完成：所有节点均超时，请检查探针端口设置。";
+      setAlert(summary, reachable.length ? "info" : "error");
       render();
     } catch (error) { setAlert("节点探针失败：" + error.message); }
   });
