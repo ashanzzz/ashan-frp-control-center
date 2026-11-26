@@ -55,9 +55,15 @@ impl Coordinator {
             .try_lock()
             .map_err(|_| ProviderSettingsApplyError::Busy)?;
         let saved = self.state.db.update_provider_settings(input).await?;
-        self.state
-            .chml
-            .reconfigure(&saved.chmlfrp_base_url, &saved.chmlfrp_token);
+        self.state.chml.reconfigure_full(
+            &saved.chmlfrp_base_url,
+            &saved.chmlfrp_token,
+            &saved.chmlfrp_refresh_token,
+            saved.chmlfrp_token_expires_at,
+            &saved.chmlfrp_username,
+            &saved.chmlfrp_password,
+            &saved.chmlfrp_totp_secret,
+        );
         self.state.cf.reconfigure(
             &saved.cloudflare_api_base,
             &saved.cloudflare_api_token,

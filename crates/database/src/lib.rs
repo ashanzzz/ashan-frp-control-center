@@ -20,6 +20,11 @@ pub struct Database {
 pub struct ProviderSettings {
     pub chmlfrp_base_url: String,
     pub chmlfrp_token: String,
+    pub chmlfrp_refresh_token: String,
+    pub chmlfrp_token_expires_at: i64,
+    pub chmlfrp_username: String,
+    pub chmlfrp_password: String,
+    pub chmlfrp_totp_secret: String,
     pub cloudflare_api_base: String,
     pub cloudflare_api_token: String,
     pub cloudflare_zone_id: String,
@@ -34,6 +39,11 @@ impl ProviderSettings {
         ProviderSettingsView {
             chmlfrp_base_url: self.chmlfrp_base_url.clone(),
             chmlfrp_token_configured: !self.chmlfrp_token.trim().is_empty(),
+            chmlfrp_refresh_token_configured: !self.chmlfrp_refresh_token.trim().is_empty(),
+            chmlfrp_token_expires_at: self.chmlfrp_token_expires_at,
+            chmlfrp_username: self.chmlfrp_username.clone(),
+            chmlfrp_password_configured: !self.chmlfrp_password.trim().is_empty(),
+            chmlfrp_totp_configured: !self.chmlfrp_totp_secret.trim().is_empty(),
             cloudflare_api_base: self.cloudflare_api_base.clone(),
             cloudflare_api_token_configured: !self.cloudflare_api_token.trim().is_empty(),
             cloudflare_zone_id: self.cloudflare_zone_id.clone(),
@@ -81,8 +91,10 @@ impl Database {
 
     pub async fn provider_settings(&self) -> Result<ProviderSettings> {
         let row = sqlx::query(
-            "SELECT chmlfrp_base_url,chmlfrp_token,cloudflare_api_base,cloudflare_api_token,\
-             cloudflare_zone_id,updated_at,probe_port,probe_timeout_ms,probe_latency_tolerance_ms \
+            "SELECT chmlfrp_base_url,chmlfrp_token,chmlfrp_refresh_token,chmlfrp_token_expires_at,\
+             chmlfrp_username,chmlfrp_password,chmlfrp_totp_secret,\
+             cloudflare_api_base,cloudflare_api_token,cloudflare_zone_id,updated_at,\
+             probe_port,probe_timeout_ms,probe_latency_tolerance_ms \
              FROM provider_settings WHERE singleton_id=1",
         )
         .fetch_one(&self.pool)
@@ -90,6 +102,11 @@ impl Database {
         Ok(ProviderSettings {
             chmlfrp_base_url: row.get("chmlfrp_base_url"),
             chmlfrp_token: row.get("chmlfrp_token"),
+            chmlfrp_refresh_token: row.get("chmlfrp_refresh_token"),
+            chmlfrp_token_expires_at: row.get("chmlfrp_token_expires_at"),
+            chmlfrp_username: row.get("chmlfrp_username"),
+            chmlfrp_password: row.get("chmlfrp_password"),
+            chmlfrp_totp_secret: row.get("chmlfrp_totp_secret"),
             cloudflare_api_base: row.get("cloudflare_api_base"),
             cloudflare_api_token: row.get("cloudflare_api_token"),
             cloudflare_zone_id: row.get("cloudflare_zone_id"),
@@ -98,6 +115,36 @@ impl Database {
             probe_timeout_ms: row.get("probe_timeout_ms"),
             probe_latency_tolerance_ms: row.get("probe_latency_tolerance_ms"),
         })
+    }
+
+    /// Persist refreshed or newly logged-in ChmlFrp SSO tokens.
+    pub async fn save_chmlfrp_tokens(
+        &self,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_at_ms: i64,
+    ) -> Result<()> {
+        if let Some(refresh) = refresh_token.filter(|v| !v.trim().is_empty()) {
+            sqlx::query(
+                "UPDATE provider_settings SET chmlfrp_token=?,chmlfrp_refresh_token=?,\
+                 chmlfrp_token_expires_at=?,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
+            )
+            .bind(access_token.trim())
+            .bind(refresh.trim())
+            .bind(expires_at_ms)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE provider_settings SET chmlfrp_token=?,chmlfrp_token_expires_at=?,\
+                 updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
+            )
+            .bind(access_token.trim())
+            .bind(expires_at_ms)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
     }
 
     /// Environment variables are a one-shot compatibility bootstrap only.
@@ -141,17 +188,60 @@ impl Database {
         input: &ProviderSettingsUpdate,
     ) -> Result<ProviderSettings> {
         let current = self.provider_settings().await?;
+        let mut chmlfrp_token_expires_at = current.chmlfrp_token_expires_at;
         let chmlfrp_token = if input.clear_chmlfrp_token {
+            chmlfrp_token_expires_at = 0;
+            String::new()
+        } else if let Some(tok) = input
+            .chmlfrp_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if tok != current.chmlfrp_token {
+                chmlfrp_token_expires_at = 0;
+            }
+            tok.to_owned()
+        } else {
+            current.chmlfrp_token
+        };
+        let chmlfrp_refresh_token = if input.clear_chmlfrp_token {
             String::new()
         } else {
             input
-                .chmlfrp_token
+                .chmlfrp_refresh_token
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned)
-                .unwrap_or(current.chmlfrp_token)
+                .unwrap_or(current.chmlfrp_refresh_token)
         };
+        let (chmlfrp_username, chmlfrp_password, chmlfrp_totp_secret) =
+            if input.clear_chmlfrp_credentials {
+                (String::new(), String::new(), String::new())
+            } else {
+                let username = input
+                    .chmlfrp_username
+                    .as_deref()
+                    .map(str::trim)
+                    .map(str::to_owned)
+                    .unwrap_or(current.chmlfrp_username);
+                let password = input
+                    .chmlfrp_password
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or(current.chmlfrp_password);
+                let totp_secret = input
+                    .chmlfrp_totp_secret
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|s| s.replace(' ', "").to_ascii_uppercase())
+                    .unwrap_or(current.chmlfrp_totp_secret);
+                (username, password, totp_secret)
+            };
         let cloudflare_api_token = if input.clear_cloudflare_api_token {
             String::new()
         } else {
@@ -166,12 +256,19 @@ impl Database {
 
         sqlx::query(
             "UPDATE provider_settings SET chmlfrp_base_url=?,chmlfrp_token=?,\
+             chmlfrp_refresh_token=?,chmlfrp_token_expires_at=?,\
+             chmlfrp_username=?,chmlfrp_password=?,chmlfrp_totp_secret=?,\
              cloudflare_api_base=?,cloudflare_api_token=?,cloudflare_zone_id=?,\
              probe_port=?,probe_timeout_ms=?,probe_latency_tolerance_ms=?,\
              env_bootstrap_complete=1,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
         )
         .bind(input.chmlfrp_base_url.trim().trim_end_matches('/'))
         .bind(chmlfrp_token)
+        .bind(chmlfrp_refresh_token)
+        .bind(chmlfrp_token_expires_at)
+        .bind(chmlfrp_username)
+        .bind(chmlfrp_password)
+        .bind(chmlfrp_totp_secret)
         .bind(input.cloudflare_api_base.trim().trim_end_matches('/'))
         .bind(cloudflare_api_token)
         .bind(input.cloudflare_zone_id.trim())

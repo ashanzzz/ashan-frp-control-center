@@ -220,6 +220,11 @@ pub struct ProviderHealth {
 pub struct ProviderSettingsView {
     pub chmlfrp_base_url: String,
     pub chmlfrp_token_configured: bool,
+    pub chmlfrp_refresh_token_configured: bool,
+    pub chmlfrp_token_expires_at: i64,
+    pub chmlfrp_username: String,
+    pub chmlfrp_password_configured: bool,
+    pub chmlfrp_totp_configured: bool,
     pub cloudflare_api_base: String,
     pub cloudflare_api_token_configured: bool,
     pub cloudflare_zone_id: String,
@@ -236,6 +241,16 @@ pub struct ProviderSettingsUpdate {
     pub chmlfrp_token: Option<String>,
     #[serde(default)]
     pub clear_chmlfrp_token: bool,
+    #[serde(default)]
+    pub chmlfrp_refresh_token: Option<String>,
+    #[serde(default)]
+    pub chmlfrp_username: Option<String>,
+    #[serde(default)]
+    pub chmlfrp_password: Option<String>,
+    #[serde(default)]
+    pub chmlfrp_totp_secret: Option<String>,
+    #[serde(default)]
+    pub clear_chmlfrp_credentials: bool,
     pub cloudflare_api_base: String,
     #[serde(default)]
     pub cloudflare_api_token: Option<String>,

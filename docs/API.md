@@ -9,7 +9,8 @@ All JSON success responses use `{ "data": ... }`. Errors use `{ "code": "...", "
 - `PUT|DELETE /api/v1/tunnels/{id}` update/safely delete a plan
 - `GET|PUT /api/v1/routing` global routing policy
 - `GET|PUT /api/v1/settings/providers` read/update provider configuration; stored secrets are never returned
-- `POST /api/v1/settings/providers/test/chmlfrp` read-only ChmlFrp credential/connectivity test; supplied unsaved token takes precedence
+- `POST /api/v1/settings/providers/test/chmlfrp` read-only ChmlFrp credential/connectivity test; supplied unsaved token takes precedence or auto-renews via saved SSO credentials
+- `POST /api/v1/settings/providers/chmlfrp/sso/login` trigger ChmlFrp Qzhua OAuth2 SSO login with saved/supplied username, password, and Base32 TOTP 2FA secret
 - `POST /api/v1/settings/providers/test/cloudflare` verify Cloudflare token and optionally read the selected zone's A records
 - `POST /api/v1/settings/providers/cloudflare/zones` verify a Cloudflare token and list accessible zones
 - `GET /api/v1/nodes` ChmlFrp nodes with quarantine state

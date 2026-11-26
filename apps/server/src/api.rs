@@ -3,7 +3,7 @@ use crate::{
     reconcile,
     state::AppState,
 };
-use ashan_frp_chmlfrp::{ChmlFrpClient, RemoteTunnel, RemoteTunnelMutation};
+use ashan_frp_chmlfrp::{ChmlFrpClient, ChmlFrpConfig, RemoteTunnel, RemoteTunnelMutation};
 use ashan_frp_cloudflare::{CloudflareClient, CloudflareZone, DnsRecord, DnsRecordMutation};
 use ashan_frp_domain::{
     ApiResponse, DashboardSnapshot, ErrorResponse, ProviderHealth, ProviderSettingsUpdate,
@@ -49,8 +49,8 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
             post(test_chmlfrp),
         )
         .route(
-            "/api/v1/settings/providers/chmlfrp/email/bootstrap",
-            post(bootstrap_chmlfrp_by_email),
+            "/api/v1/settings/providers/chmlfrp/sso/login",
+            post(sso_login_chmlfrp),
         )
         .route(
             "/api/v1/settings/providers/test/cloudflare",
@@ -365,76 +365,151 @@ async fn test_chmlfrp(
 ) -> ApiResult<serde_json::Value> {
     let saved = state.app.db.provider_settings().await?;
     let base_url = candidate_value(input.base_url.as_deref(), &saved.chmlfrp_base_url);
-    let token = candidate_value(input.token.as_deref(), &saved.chmlfrp_token);
+    let supplied_token = input
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     validate_api_base("ChmlFrp API Base", &base_url)?;
-    if token.is_empty() {
-        return Err(ApiError::bad_request("请输入 ChmlFrp API Token"));
-    }
 
-    let client = ChmlFrpClient::new(&base_url, &token)?;
-    let tunnels = client.list_tunnels().await?;
+    let tunnels = if let Some(token) = supplied_token {
+        let client = ChmlFrpClient::new(&base_url, token)?;
+        client.list_tunnels().await?
+    } else if base_url == saved.chmlfrp_base_url {
+        if !state.app.chml.configured() {
+            return Err(ApiError::bad_request(
+                "请先配置 ChmlFrp API Token 或轻爪账号密码/2FA",
+            ));
+        }
+        state.app.chml.list_tunnels().await?
+    } else {
+        let client = ChmlFrpClient::new_with_auth(ChmlFrpConfig {
+            base_url,
+            token: saved.chmlfrp_token,
+            refresh_token: saved.chmlfrp_refresh_token,
+            token_expires_at: saved.chmlfrp_token_expires_at,
+            username: saved.chmlfrp_username,
+            password: saved.chmlfrp_password,
+            totp_secret: saved.chmlfrp_totp_secret,
+        })?;
+        if !client.configured() {
+            return Err(ApiError::bad_request(
+                "请先配置 ChmlFrp API Token 或轻爪账号密码/2FA",
+            ));
+        }
+        client.list_tunnels().await?
+    };
+
     Ok(Json(ApiResponse {
         data: serde_json::json!({
             "ok": true,
-            "message": "ChmlFrp API 连接成功，Token 有效",
+            "message": "ChmlFrp API 连接成功，会话有效",
             "tunnels": tunnels.len(),
         }),
     }))
 }
 
 #[derive(Debug, Deserialize)]
-struct ChmlEmailBootstrapInput {
+struct ChmlSsoLoginInput {
     #[serde(default)]
-    code: Option<String>,
+    base_url: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    totp_secret: Option<String>,
 }
 
-async fn bootstrap_chmlfrp_by_email(
+async fn sso_login_chmlfrp(
     State(state): State<ApiState>,
-    Json(input): Json<ChmlEmailBootstrapInput>,
-) -> ApiResult<ProviderSettingsView> {
+    Json(input): Json<ChmlSsoLoginInput>,
+) -> ApiResult<serde_json::Value> {
     let saved = state.app.db.provider_settings().await?;
+    let base_url = candidate_value(input.base_url.as_deref(), &saved.chmlfrp_base_url);
+    validate_api_base("ChmlFrp API Base", &base_url)?;
 
-    let code = match input.code {
-        Some(c) if !c.trim().is_empty() => c.trim().to_string(),
-        _ => state
-            .app
-            .chml
-            .fetch_email_verification_code()
-            .await
-            .map_err(|error| ApiError::bad_gateway(format!("邮箱验证码自动提取失败: {error}")))?,
-    };
+    let has_override = input
+        .base_url
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty())
+        || input
+            .username
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+        || input
+            .password
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+        || input
+            .totp_secret
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty());
 
-    let identity = state
+    if has_override {
+        let update = ProviderSettingsUpdate {
+            chmlfrp_base_url: base_url,
+            chmlfrp_token: None,
+            clear_chmlfrp_token: false,
+            chmlfrp_refresh_token: None,
+            chmlfrp_username: input.username,
+            chmlfrp_password: input.password,
+            chmlfrp_totp_secret: input.totp_secret,
+            clear_chmlfrp_credentials: false,
+            cloudflare_api_base: saved.cloudflare_api_base,
+            cloudflare_api_token: None,
+            clear_cloudflare_api_token: false,
+            cloudflare_zone_id: saved.cloudflare_zone_id,
+            probe_port: saved.probe_port.clamp(1, 65535) as u16,
+            probe_timeout_ms: saved.probe_timeout_ms.max(100) as u64,
+            probe_latency_tolerance_ms: saved.probe_latency_tolerance_ms.max(0) as u64,
+        };
+        if let Err(err) = state.coordinator.apply_provider_settings(&update).await {
+            return match err {
+                ProviderSettingsApplyError::Busy => Err(ApiError::conflict(
+                    "全局同步/故障切换正在运行，请在操作结束后再登录更新",
+                )),
+                ProviderSettingsApplyError::Other(e) => Err(ApiError::from(e)),
+            };
+        }
+    }
+
+    let bundle = state
         .app
         .chml
-        .bootstrap_token_via_email_code(&code)
+        .login_now()
         .await
-        .map_err(|error| ApiError::bad_gateway(format!("ChmlFrp 验证码认证失败: {error}")))?;
+        .map_err(|error| ApiError::bad_gateway(format!("ChmlFrp SSO 自动登录失败: {error}")))?;
+    let user = state.app.chml.userinfo().await?;
+    let view = state.app.db.provider_settings().await?.view();
 
-    let update = ProviderSettingsUpdate {
-        chmlfrp_base_url: saved.chmlfrp_base_url,
-        chmlfrp_token: Some(identity.api_token),
-        clear_chmlfrp_token: false,
-        cloudflare_api_base: saved.cloudflare_api_base,
-        cloudflare_api_token: None,
-        clear_cloudflare_api_token: false,
-        cloudflare_zone_id: saved.cloudflare_zone_id,
-        probe_port: saved.probe_port.clamp(1, 65535) as u16,
-        probe_timeout_ms: saved.probe_timeout_ms.max(100) as u64,
-        probe_latency_tolerance_ms: saved.probe_latency_tolerance_ms.max(0) as u64,
-    };
+    state
+        .app
+        .db
+        .activity(
+            None,
+            "provider_settings",
+            "info",
+            "ChmlFrp 轻爪 SSO + 2FA 自动登录成功并已保存凭证",
+            None,
+            None,
+            serde_json::json!({
+                "username": user.username,
+                "usergroup": user.usergroup,
+                "expires_at_ms": bundle.expires_at_ms,
+            }),
+        )
+        .await?;
 
-    let view = match state.coordinator.apply_provider_settings(&update).await {
-        Ok(view) => view,
-        Err(ProviderSettingsApplyError::Busy) => {
-            return Err(ApiError::conflict(
-                "全局同步/故障切换正在运行，请在操作结束后再更新 Token",
-            ));
-        }
-        Err(ProviderSettingsApplyError::Other(error)) => return Err(ApiError::from(error)),
-    };
-
-    Ok(Json(ApiResponse { data: view }))
+    Ok(Json(ApiResponse {
+        data: serde_json::json!({
+            "ok": true,
+            "username": user.username,
+            "usergroup": user.usergroup,
+            "expires_at_ms": bundle.expires_at_ms,
+            "settings": view,
+        }),
+    }))
 }
 
 async fn test_cloudflare(
@@ -654,7 +729,7 @@ async fn chmlfrp_update_tunnel(
             "该隧道已由 Ashan 管理；受管隧道必须修改计划后执行 GLOBAL RECONCILE，不能直接改远端",
         ));
     }
-    state.app.chml.update_remote_tunnel(&input).await?;
+    state.app.chml.update_remote_tunnel(id, &input).await?;
     state
         .app
         .db
@@ -727,7 +802,7 @@ async fn chmlfrp_test_write(
     }
 
     let mutation = mutation_from_remote(&current)?;
-    state.app.chml.update_remote_tunnel(&mutation).await?;
+    state.app.chml.update_remote_tunnel(id, &mutation).await?;
 
     let after = state
         .app

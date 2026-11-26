@@ -277,7 +277,7 @@ function renderChmlfrp() {
         ? simpleBadge("超时", "bad")
         : `${probeResult.fastest ? simpleBadge("最快", "ok") + " " : ""}${Number(probeResult.avg_rtt_ms).toFixed(1)} ms`
       : "—";
-    return `<tr><td><strong>${esc(node.name)}</strong><small>${esc(node.area)}</small></td><td>${esc(node.real_ip || "—")}</td><td>${esc(node.state)}</td><td>${role}</td><td>${rttCell}</td><td>${quarantine}</td></tr>`;
+    return `<tr><td><strong>${esc(node.name)}</strong><small>${esc(node.area)} · ${node.web_supported ? "支持建站" : "不支持建站"}</small></td><td>${esc(node.real_ip || "—")}</td><td>${esc(node.state)}</td><td>${role}</td><td>${rttCell}</td><td>${quarantine}</td></tr>`;
   }).join("");
   return `<div class="provider-console-head"><div><h2>ChmlFrp API</h2><p>${esc(d.chmlfrp_health.message)}</p></div>${simpleBadge(connected ? "Connected" : (p?.chmlfrp_token_configured ? "Disconnected" : "未配置"), connected ? "ok" : (p?.chmlfrp_token_configured ? "bad" : ""))}</div>
     <div class="actions resource-toolbar"><button id="chml-refresh">刷新资源</button><button id="chml-diag">API 诊断</button><button id="chml-create" ${connected ? "" : "disabled"}>+ 创建 ChmlFrp 隧道</button><button id="probe-nodes-btn" ${connected ? "" : "disabled"} title="对在线节点并发 TCP 探针，测量到 frpc 端口的延迟">测量全部节点</button>${!connected ? `<button data-goto="settings">前往设置</button>` : ""}</div>
@@ -348,12 +348,17 @@ function renderSettings() {
   const nodeOptions = (selected, allowEmpty = true) => `${allowEmpty ? `<option value="">未配置</option>` : ""}${state.nodes.map((node) => `<option value="${esc(node.name)}" ${node.name === selected ? "selected" : ""}>${esc(node.name)} · ${esc(node.area)} · ${esc(node.state)}</option>`).join("")}`;
   const routingBody = r.active_node ? `<form id="routing-form"><div class="form-grid"><label>ACTIVE<input value="${esc(r.active_node)}" disabled></label><label>STANDBY<select id="routing-standby">${nodeOptions(r.standby_node)}</select></label></div><label>故障节点隔离天数<input id="routing-days" type="number" min="1" max="3650" value="${esc(r.quarantine_days)}"></label><label class="check compact-check"><input id="routing-enabled" type="checkbox" ${r.failover_enabled ? "checked" : ""}> 启用 FRPC 日志驱动自动全局切换</label><div class="actions"><button type="submit">保存路由策略</button></div><p class="provider-note">ACTIVE 已锁定。更换 ACTIVE 必须使用 GLOBAL FAILOVER。</p></form>` : `<div class="empty-state"><strong>尚未初始化 ACTIVE / STANDBY</strong><p>先连接 ChmlFrp 并读取节点，再通过初始化向导确认。向导只保存路由策略，不会立即迁移隧道。</p><button id="routing-bootstrap" ${chmlStatus.connected ? "" : "disabled"}>初始化 GLOBAL ROUTING</button></div>`;
   return `<div class="settings-stack">
-    <section class="settings-card"><div class="settings-card-head"><div><h2>ChmlFrp 连接</h2><p>Token 保存到 /data SQLite；保存后立即热更新并就地验证。</p></div>${chmlBadge}</div>
+    <section class="settings-card"><div class="settings-card-head"><div><h2>ChmlFrp 连接</h2><p>支持直接填写 Token，或填写轻爪账号 + 密码 + 2FA TOTP 密钥自动登录续期；保存后立即热更新。</p></div>${chmlBadge}</div>
       <label>API Base URL<input id="chml-base" value="${esc(p.chmlfrp_base_url)}" autocomplete="off" spellcheck="false"></label>
-      <label>API Token<input id="chml-token" type="password" autocomplete="new-password" placeholder="${p.chmlfrp_token_configured ? "已保存；留空保持当前 Token" : "粘贴 ChmlFrp API Token"}"></label>
+      <label>API Token (可选；自动 SSO 登录会维护最新 Token)<input id="chml-token" type="password" autocomplete="new-password" placeholder="${p.chmlfrp_token_configured ? "已保存；留空保持当前 Token" : "粘贴 ChmlFrp Access Token"}"></label>
+      <div class="form-grid">
+        <label>轻爪账号 / 邮箱<input id="chml-user" value="${esc(p.chmlfrp_username || "")}" placeholder="335356119@qq.com" autocomplete="username"></label>
+        <label>轻爪密码<input id="chml-pass" type="password" autocomplete="new-password" placeholder="${p.chmlfrp_password_configured ? "已保存；留空保持" : "输入轻爪账号密码"}"></label>
+        <label>2FA TOTP 密钥 (Base32)<input id="chml-totp" type="password" autocomplete="off" placeholder="${p.chmlfrp_totp_configured ? "已保存；留空保持" : "如 6XKPLTJAFJ..."}"></label>
+      </div>
       ${providerFeedbackHtml("chmlfrp", chmlStatus.message)}
-      <div class="provider-actions"><button type="button" id="chml-test">测试连接</button><button type="button" id="chml-save">保存并立即验证</button>${p.chmlfrp_token_configured ? `<button type="button" id="chml-clear" class="danger">清除 Token</button>` : ""}<a class="button-link" href="https://panel.chmlfrp.net/" target="_blank" rel="noopener noreferrer">打开 ChmlFrp 官方面板获取 API Token</a></div>
-      <p class="provider-note">不要粘贴包含 access_token / refresh_token 的完整浏览器授权 URL；这里需要 ChmlFrp API Token。</p>
+      <div class="provider-actions"><button type="button" id="chml-test">测试连接</button><button type="button" id="chml-save">保存并立即验证</button><button type="button" id="chml-sso-login">SSO + 2FA 自动登录</button>${p.chmlfrp_token_configured ? `<button type="button" id="chml-clear" class="danger">清除 Token</button>` : ""}<a class="button-link" href="https://panel.chmlfrp.net/" target="_blank" rel="noopener noreferrer">打开 ChmlFrp 官方面板获取 API Token</a></div>
+      <p class="provider-note">配置轻爪账号密码与 2FA TOTP 密钥后，系统会在 Token 过期时自动刷新或重登自愈，无需人工介入。</p>
     </section>
     <section class="settings-card"><div class="settings-card-head"><div><h2>节点延迟探针</h2><p>Failover 时对候选节点并发 TCP 探针，选延迟最低节点。</p></div></div>
       <div class="form-grid">
@@ -600,6 +605,7 @@ function bindPageActions() {
   $("#routing-form")?.addEventListener("submit", saveRouting);
   $("#chml-test")?.addEventListener("click", () => testChmlFrp());
   $("#chml-save")?.addEventListener("click", saveChmlFrpSettings);
+  $("#chml-sso-login")?.addEventListener("click", ssoLoginChmlFrp);
   $("#chml-clear")?.addEventListener("click", clearChmlFrpToken);
   $("#cf-zones")?.addEventListener("click", loadCloudflareZones);
   $("#cf-test")?.addEventListener("click", () => testCloudflare());
@@ -653,7 +659,7 @@ async function saveChmlFrpSettings() {
   const probePort = Number($("#probe-port")?.value || p.probe_port || 7000);
   const probeTimeout = Number($("#probe-timeout")?.value || p.probe_timeout_ms || 2000);
   const probeTolerance = Number($("#probe-tolerance")?.value ?? p.probe_latency_tolerance_ms ?? 50);
-  const body = { chmlfrp_base_url: $("#chml-base").value.trim(), chmlfrp_token: $("#chml-token").value.trim() || null, clear_chmlfrp_token: false, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id, probe_port: probePort, probe_timeout_ms: probeTimeout, probe_latency_tolerance_ms: probeTolerance };
+  const body = { chmlfrp_base_url: $("#chml-base").value.trim(), chmlfrp_token: $("#chml-token").value.trim() || null, clear_chmlfrp_token: false, chmlfrp_username: $("#chml-user")?.value.trim() ?? p.chmlfrp_username ?? "", chmlfrp_password: $("#chml-pass")?.value.trim() || null, chmlfrp_totp_secret: $("#chml-totp")?.value.trim() || null, cloudflare_api_base: p.cloudflare_api_base, cloudflare_api_token: null, clear_cloudflare_api_token: false, cloudflare_zone_id: p.cloudflare_zone_id, probe_port: probePort, probe_timeout_ms: probeTimeout, probe_latency_tolerance_ms: probeTolerance };
   try {
     setProviderFeedback("chmlfrp", "正在保存配置…");
     state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });
@@ -663,6 +669,23 @@ async function saveChmlFrpSettings() {
     await Promise.all([loadProviderSettings(), loadNodes(), loadRemoteTunnels()]);
     render();
   } catch (error) { setProviderFeedback("chmlfrp", `保存失败：${error.message}`, "bad"); }
+}
+
+async function ssoLoginChmlFrp() {
+  try {
+    setProviderFeedback("chmlfrp", "正在执行轻爪 SSO + 2FA 自动登录…");
+    const payload = {
+      base_url: $("#chml-base")?.value.trim() || null,
+      username: $("#chml-user")?.value.trim() || null,
+      password: $("#chml-pass")?.value.trim() || null,
+      totp_secret: $("#chml-totp")?.value.trim() || null,
+    };
+    const res = await api("/api/v1/settings/providers/chmlfrp/sso/login", { method: "POST", body: JSON.stringify(payload) });
+    state.providerSettings = res.settings;
+    setProviderFeedback("chmlfrp", `SSO 登录成功：${res.username} (${res.usergroup})`, "ok");
+    await Promise.all([refresh(), loadNodes(), loadRemoteTunnels()]);
+    render();
+  } catch (error) { setProviderFeedback("chmlfrp", `SSO 登录失败：${error.message}`, "bad"); }
 }
 
 async function saveProbeSettings() {

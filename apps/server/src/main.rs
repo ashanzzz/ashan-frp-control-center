@@ -4,7 +4,7 @@ mod reconcile;
 mod state;
 
 use anyhow::{Context, Result};
-use ashan_frp_chmlfrp::ChmlFrpClient;
+use ashan_frp_chmlfrp::{ChmlFrpClient, ChmlFrpConfig};
 use ashan_frp_cloudflare::CloudflareClient;
 use ashan_frp_database::Database;
 use ashan_frp_frpc_runtime::FrpcManager;
@@ -50,7 +50,15 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         db,
-        chml: ChmlFrpClient::new(&providers.chmlfrp_base_url, &providers.chmlfrp_token)?,
+        chml: ChmlFrpClient::new_with_auth(ChmlFrpConfig {
+            base_url: providers.chmlfrp_base_url.clone(),
+            token: providers.chmlfrp_token.clone(),
+            refresh_token: providers.chmlfrp_refresh_token.clone(),
+            token_expires_at: providers.chmlfrp_token_expires_at,
+            username: providers.chmlfrp_username.clone(),
+            password: providers.chmlfrp_password.clone(),
+            totp_secret: providers.chmlfrp_totp_secret.clone(),
+        })?,
         cf: CloudflareClient::new(
             &providers.cloudflare_api_base,
             &providers.cloudflare_api_token,
@@ -63,6 +71,18 @@ async fn main() -> Result<()> {
         ),
         failover_job: Arc::new(RwLock::new(None)),
     });
+    let db_for_hook = state.db.clone();
+    state.chml.set_token_persister(Arc::new(move |bundle| {
+        let db = db_for_hook.clone();
+        Box::pin(async move {
+            db.save_chmlfrp_tokens(
+                &bundle.access_token,
+                bundle.refresh_token.as_deref(),
+                bundle.expires_at_ms,
+            )
+            .await
+        })
+    }));
     let coordinator = Coordinator::new(state.clone());
     coordinator.spawn_frpc_fault_watcher();
 
