@@ -3,8 +3,8 @@ use anyhow::{Context, Result, anyhow};
 use ashan_frp_chmlfrp::RemoteTunnel;
 use ashan_frp_cloudflare::DnsRecord;
 use ashan_frp_domain::{
-    FaultDomain, FrpcEvent, FrpcEventType, ProviderSettingsUpdate, ProviderSettingsView,
-    RoutingPhase, TunnelPlan,
+    FrpcEvent, FrpcEventType, ProviderSettingsUpdate, ProviderSettingsView, RoutingPhase,
+    TunnelPlan,
 };
 use ashan_frp_failover::{CandidatePolicy, ordered_candidates_with_policy};
 use ashan_frp_frpc_runtime::ReadinessError;
@@ -97,22 +97,14 @@ impl Coordinator {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(event) if event.triggers_failover => {
+                    Ok(event)
+                        if event.triggers_failover
+                            && event.event_type == FrpcEventType::ServerProxyConflict =>
+                    {
                         let next = me.clone();
                         tokio::spawn(async move {
                             if let Err(err) = next.queued_global_failover(event).await {
                                 error!(error = %err, "automatic global failover failed");
-                            }
-                        });
-                    }
-                    Ok(event) if event.event_type == FrpcEventType::NetworkAmbiguous => {
-                        let next = me.clone();
-                        tokio::spawn(async move {
-                            if let Ok(Some(confirmed)) =
-                                next.confirm_ambiguous_network_fault(event).await
-                                && let Err(err) = next.queued_global_failover(confirmed).await
-                            {
-                                error!(error = %err, "confirmed network fault failover failed");
                             }
                         });
                     }
@@ -144,41 +136,118 @@ impl Coordinator {
         self.global_failover_locked(Some(event)).await.map(|_| ())
     }
 
-    async fn confirm_ambiguous_network_fault(
-        &self,
-        mut event: FrpcEvent,
-    ) -> Result<Option<FrpcEvent>> {
-        if event.runtime_generation != self.state.frpc.generation() {
-            return Ok(None);
-        }
+    /// Background watchdog that tracks continuous FRPC disconnection duration, restarts
+    /// unexpected FRPC process exits, and promotes to GLOBAL_FAILOVER once the outage
+    /// persists beyond `failover_disconnect_grace_secs` (default 10 minutes) or ChmlFrp
+    /// confirms the active node went offline / under attack after >= 60 seconds offline.
+    pub fn spawn_disconnect_watchdog(&self) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut last_logged_since: Option<String> = None;
+            loop {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                if let Err(err) = me.watchdog_tick(&mut last_logged_since).await {
+                    warn!(error = %err, "disconnect watchdog tick failed");
+                }
+            }
+        });
+    }
+
+    async fn watchdog_tick(&self, last_logged_since: &mut Option<String>) -> Result<()> {
         let routing = self.state.db.routing_state().await?;
         let Some(active) = routing.active_node else {
-            return Ok(None);
+            return Ok(());
         };
-        let info = match self.state.chml.node_info(&active).await {
-            Ok(info) => info,
-            Err(_) => return Ok(None),
+        if routing.state == RoutingPhase::Failover || self.lock.try_lock().is_err() {
+            return Ok(());
+        }
+        let plans = self.state.db.list_tunnels().await?;
+        if !plans.iter().any(|p| p.enabled) {
+            return Ok(());
+        }
+
+        let status = self.state.frpc.status().await;
+        if !status.running && status.config_revision.is_some() {
+            warn!("FRPC runtime exited unexpectedly; restarting FRPC client");
+            let _ = self.state.frpc.start().await;
+        }
+
+        let Some(elapsed) = self.state.frpc.disconnected_duration().await else {
+            *last_logged_since = None;
+            return Ok(());
         };
-        if !info.state.eq_ignore_ascii_case("online") {
-            event.event_type = FrpcEventType::ServerConnectionFailure;
-            event.fault_domain = FaultDomain::Node;
-            event.severity = "critical".into();
-            event.triggers_failover = true;
-            self.state
+        if !routing.failover_enabled {
+            return Ok(());
+        }
+
+        let settings = self.state.db.provider_settings().await?;
+        let grace_secs = settings.failover_disconnect_grace_secs.max(30) as u64;
+
+        if elapsed >= Duration::from_secs(15) && *last_logged_since != status.disconnected_since {
+            *last_logged_since = status.disconnected_since.clone();
+            let _ = self
+                .state
+                .db
+                .activity(
+                    None,
+                    "frpc_fault",
+                    "warning",
+                    &format!(
+                        "FRPC 与节点连接断开，开始断线守护计时（持续 {} 秒未恢复将自动切换）",
+                        grace_secs
+                    ),
+                    None,
+                    Some(&active),
+                    serde_json::json!({
+                        "disconnected_since": status.disconnected_since,
+                        "last_error": status.last_error,
+                    }),
+                )
+                .await;
+        }
+
+        let mut trigger_reason: Option<String> = None;
+        if elapsed >= Duration::from_secs(grace_secs) {
+            trigger_reason = Some(format!(
+                "FRPC 连续断线已超过 {} 秒（宽限期 {} 秒）",
+                elapsed.as_secs(),
+                grace_secs
+            ));
+        } else if elapsed >= Duration::from_secs(60)
+            && let Ok(summary) = self.state.chml.node_summary(&active).await
+            && (!summary.state.eq_ignore_ascii_case("online") || summary.policy.attacked)
+        {
+            trigger_reason = Some(format!(
+                "FRPC 断线 {} 秒且 ChmlFrp 节点状态异常 (state={}, attacked={})",
+                elapsed.as_secs(),
+                summary.state,
+                summary.policy.attacked
+            ));
+        }
+
+        if let Some(reason) = trigger_reason {
+            let event = self.state.frpc.node_fault_event(&reason);
+            let _ = self
+                .state
                 .db
                 .activity(
                     None,
                     "frpc_fault",
                     "critical",
-                    "FRPC 模糊网络故障经 ChmlFrp 节点状态确认，提升为节点级故障",
-                    event.proxy_name.as_deref(),
+                    &format!("{reason}，触发自动全局故障切换"),
+                    None,
                     Some(&active),
-                    serde_json::json!({"raw": event.raw, "node_state": info.state}),
+                    serde_json::json!({ "elapsed_secs": elapsed.as_secs() }),
                 )
-                .await?;
-            return Ok(Some(event));
+                .await;
+            let next = self.clone();
+            tokio::spawn(async move {
+                if let Err(err) = next.queued_global_failover(event).await {
+                    error!(error = %err, "disconnect watchdog failover failed");
+                }
+            });
         }
-        Ok(None)
+        Ok(())
     }
 
     pub async fn global_failover(&self, trigger: Option<FrpcEvent>) -> Result<String> {
@@ -774,31 +843,19 @@ impl Coordinator {
                 return Err(MigrationError::TargetNode(err));
             }
             Err(ReadinessError::Timeout { connected, missing }) => {
-                // A timeout alone does not prove the standby is bad. Promote to a
-                // node failure only when ChmlFrp independently reports it offline.
-                match self.state.chml.node_info(target).await {
-                    Ok(info) if !info.state.eq_ignore_ascii_case("online") => {
-                        return Err(MigrationError::TargetNode(format!(
-                            "readiness timeout and node state={}",
-                            info.state
-                        )));
-                    }
-                    _ => {
-                        self.rollback_provider(job, &changed).await;
-                        if restore_previous_runtime {
-                            self.restore_previous_frpc(
-                                previous_config.as_deref(),
-                                previous_revision,
-                            )
-                            .await;
-                        } else {
-                            let _ = self.state.frpc.stop().await;
-                        }
-                        return Err(anyhow!(
-                            "FRPC readiness timeout without confirmed node failure; connected={connected}, missing={missing}"
-                        ).into());
-                    }
+                // Candidate node failed to become ready within 20s (e.g. FRPS blocked,
+                // attacked while API still says online, or proxies failed to start).
+                // Quarantine it and advance to the next ranked candidate.
+                self.rollback_provider(job, &changed).await;
+                if restore_previous_runtime {
+                    self.restore_previous_frpc(previous_config.as_deref(), previous_revision)
+                        .await;
+                } else {
+                    let _ = self.state.frpc.stop().await;
                 }
+                return Err(MigrationError::TargetNode(format!(
+                    "target node FRPC readiness timeout: connected={connected}, missing={missing}"
+                )));
             }
             Err(ReadinessError::NonNode(err)) => {
                 self.rollback_provider(job, &changed).await;

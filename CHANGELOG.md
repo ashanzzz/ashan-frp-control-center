@@ -2,6 +2,7 @@
 
 ## 0.4.1 - 2026-11-26
 
+- Add FRPC disconnect grace watchdog (`failover_disconnect_grace_secs`, default `600s` = 10 min via migration `0007_disconnect_grace.sql`): prevents false 30-day quarantines on brief transient drops, promotes sustained >=10 min disconnects or API-confirmed offline/attacked states (>60s) to `GLOBAL_FAILOVER`, advances to subsequent ranked candidates when target `wait_ready` times out, and exposes `require_web` + `last_connected_at`/`disconnected_since` in API and WebUI.
 - Add real-port node intelligence (`frps_port` from `/nodeinfo`, `notes`, `nodegroup`, `china`, `fangyu`, `load1/5/15`, `bandwidth_usage_percent`) and structured capability/stability tags (`可建站`, `大带宽`/`AS4837`/`10G`, `禁网盘/大流量`, `被攻击/不可用`, `高负载`, `需备案`, `需过白`, `封海外`, `有防御`), plus migration `0006_node_policy_settings.sql` for latency-first + drive/bandwidth-compatible candidate filtering.
 - Add multi-method ChmlFrp authentication via Qzhua OAuth2 SSO + RFC 6238 TOTP 2FA (`POST /api/v1/settings/providers/chmlfrp/sso/login`) and automatic `/sso/refresh` renewal with `Authorization: Bearer` API alignment (plus migration `0005_chmlfrp_multi_auth.sql`).
 - Add `crates/node-probe` for concurrent TCP RTT probing across eligible ChmlFrp nodes (3 connect attempts per node, averaged RTT, configurable port/timeout/tolerance).

@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
     }));
     let coordinator = Coordinator::new(state.clone());
     coordinator.spawn_frpc_fault_watcher();
+    coordinator.spawn_disconnect_watchdog();
 
     restore_frpc_if_possible(&state, &config).await;
 

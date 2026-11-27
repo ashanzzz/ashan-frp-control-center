@@ -361,6 +361,10 @@ pub struct FrpcRuntimeStatus {
     pub config_path: String,
     pub config_revision: Option<i64>,
     pub started_at: Option<String>,
+    #[serde(default)]
+    pub last_connected_at: Option<String>,
+    #[serde(default)]
+    pub disconnected_since: Option<String>,
     pub last_error: Option<String>,
 }
 
@@ -391,6 +395,7 @@ pub struct ProviderSettingsView {
     pub probe_exclude_icp_required: bool,
     pub probe_exclude_whitelist_and_ban_overseas: bool,
     pub probe_max_load1: f64,
+    pub failover_disconnect_grace_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -430,6 +435,8 @@ pub struct ProviderSettingsUpdate {
     pub probe_exclude_whitelist_and_ban_overseas: bool,
     #[serde(default = "default_probe_max_load1")]
     pub probe_max_load1: f64,
+    #[serde(default = "default_failover_disconnect_grace_secs")]
+    pub failover_disconnect_grace_secs: u64,
 }
 
 fn default_probe_port() -> u16 {
@@ -446,6 +453,9 @@ fn default_true() -> bool {
 }
 fn default_probe_max_load1() -> f64 {
     5.0
+}
+fn default_failover_disconnect_grace_secs() -> u64 {
+    600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -464,6 +474,8 @@ pub struct ActivityEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DashboardSnapshot {
     pub routing: RoutingState,
+    #[serde(default)]
+    pub require_web: bool,
     pub active_node: Option<NodeSummary>,
     pub standby_node: Option<NodeSummary>,
     pub frpc: FrpcRuntimeStatus,

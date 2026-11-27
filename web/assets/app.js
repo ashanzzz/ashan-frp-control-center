@@ -364,7 +364,7 @@ function renderChmlfrp() {
     ${renderDiagnostics(state.chmlDiagnostics, "chml")}
     <h2 class="section-title">远端隧道 <span class="count-pill">${state.remoteTunnels.length}</span></h2>
     <div class="table-wrap"><table><thead><tr><th>隧道</th><th>节点</th><th>协议</th><th>本地</th><th>外部</th><th>状态</th><th>纳管</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">${connected ? "未读取到隧道" : "请先配置 ChmlFrp"}</td></tr>`}</tbody></table></div>
-    <div class="section-separator"></div><div class="node-section-head"><h2 class="section-title">节点 <span class="count-pill">${sortedNodes.length}/${state.nodes.length}</span></h2><div class="actions filter-pills"><button type="button" data-node-filter="all" class="${state.nodeFilter === "all" ? "active" : ""}">全部 (${state.nodes.length})</button><button type="button" data-node-filter="recommended" class="${state.nodeFilter === "recommended" ? "active" : ""}">建站+网盘可用 (${eligibleCount})</button><button type="button" data-node-filter="web" class="${state.nodeFilter === "web" ? "active" : ""}">仅看可建站 (${webCount})</button></div></div>
+    <div class="section-separator"></div><div class="node-section-head"><h2 class="section-title">节点 <span class="count-pill">${sortedNodes.length}/${state.nodes.length}</span> ${simpleBadge(d.require_web ? "当前需要建站" : "纯TCP/UDP不强制建站", d.require_web ? "warn" : "ok")}</h2><div class="actions filter-pills"><button type="button" data-node-filter="all" class="${state.nodeFilter === "all" ? "active" : ""}">全部 (${state.nodes.length})</button><button type="button" data-node-filter="recommended" class="${state.nodeFilter === "recommended" ? "active" : ""}">建站+网盘可用 (${eligibleCount})</button><button type="button" data-node-filter="web" class="${state.nodeFilter === "web" ? "active" : ""}">仅看可建站 (${webCount})</button></div></div>
     <div class="table-wrap"><table><thead><tr><th>节点 / 标签 / 官方说明</th><th>真实 IP / 端口</th><th>状态 / 负载</th><th>角色</th><th>探针延迟</th><th>隔离</th></tr></thead><tbody>${nodeRows || `<tr><td colspan="6" class="muted">暂无匹配节点</td></tr>`}</tbody></table></div>`;
 }
 
@@ -399,7 +399,7 @@ function renderFrpc() {
   const d = state.dashboard;
   const logs = state.logs.map((event) => `${event.at} [${event.severity}] ${event.proxy_name ? `[${event.proxy_name}] ` : ""}${event.raw}`).join("\n");
   return `<div class="panel-head"><div><h2>运行状态</h2><p>配置路径：${esc(d.frpc.config_path)}</p></div><div class="actions"><button data-frpc="start">启动</button><button data-frpc="restart">重启</button><button data-frpc="stop" class="danger">停止</button></div></div>
-    <dl class="kv"><dt>进程</dt><dd>${d.frpc.running ? "Running" : "Stopped"}</dd><dt>PID</dt><dd>${esc(d.frpc.pid ?? "—")}</dd><dt>服务端</dt><dd>${d.frpc.connected ? "Connected" : "Disconnected"}</dd><dt>配置 Revision</dt><dd>${esc(d.frpc.config_revision ?? "—")}</dd><dt>最近错误</dt><dd>${esc(d.frpc.last_error || "无")}</dd></dl><br><h2>实时日志</h2><pre id="log-view" class="log-view">${esc(logs || "暂无日志")}</pre>`;
+    <dl class="kv"><dt>进程</dt><dd>${d.frpc.running ? "Running" : "Stopped"}</dd><dt>PID</dt><dd>${esc(d.frpc.pid ?? "—")}</dd><dt>服务端</dt><dd>${d.frpc.connected ? "Connected" : "Disconnected"}</dd><dt>最近连通</dt><dd>${esc(d.frpc.last_connected_at || "—")}</dd><dt>连续断线起点</dt><dd>${esc(d.frpc.disconnected_since || "无（连接正常）")}</dd><dt>配置 Revision</dt><dd>${esc(d.frpc.config_revision ?? "—")}</dd><dt>最近错误</dt><dd>${esc(d.frpc.last_error || "无")}</dd></dl><br><h2>实时日志</h2><pre id="log-view" class="log-view">${esc(logs || "暂无日志")}</pre>`;
 }
 
 function renderActivity() {
@@ -446,6 +446,7 @@ function renderSettings() {
         <label>单次连接超时 (ms)<input id="probe-timeout" type="number" min="100" max="30000" value="${esc(p.probe_timeout_ms ?? 2000)}"></label>
         <label>STANDBY 容忍带 (ms)<input id="probe-tolerance" type="number" min="0" max="5000" value="${esc(p.probe_latency_tolerance_ms ?? 50)}"></label>
         <label>最大允许 load1 负载阈值<input id="probe-max-load1" type="number" min="0.5" max="100" step="0.5" value="${esc(p.probe_max_load1 ?? 5)}"></label>
+        <label>连续断线自动切换宽限期 (秒)<input id="probe-disconnect-grace" type="number" min="30" max="86400" value="${esc(p.failover_disconnect_grace_secs ?? 600)}"></label>
       </div>
       <label class="check compact-check"><input id="probe-require-bw" type="checkbox" ${p.probe_require_high_bandwidth ?? true ? "checked" : ""}> 兼容网盘 / 大带宽（排除禁大流量、禁网盘、高峰限速节点）</label>
       <label class="check compact-check"><input id="probe-allow-icp" type="checkbox" ${!(p.probe_exclude_icp_required ?? false) ? "checked" : ""}> 允许需国内备案节点参与推荐（335356119.xyz 已备案建议勾选）</label>
@@ -775,6 +776,7 @@ function buildProviderUpdatePayload(overrides = {}) {
     probe_exclude_icp_required: p.probe_exclude_icp_required ?? false,
     probe_exclude_whitelist_and_ban_overseas: p.probe_exclude_whitelist_and_ban_overseas ?? true,
     probe_max_load1: p.probe_max_load1 ?? 5.0,
+    failover_disconnect_grace_secs: p.failover_disconnect_grace_secs ?? 600,
     ...overrides,
   };
 }
@@ -821,9 +823,11 @@ async function saveProbeSettings() {
   const probeTimeout = Number($("#probe-timeout").value);
   const probeTolerance = Number($("#probe-tolerance").value);
   const maxLoad1 = Number($("#probe-max-load1").value);
+  const graceSecs = Number($("#probe-disconnect-grace").value);
   if (!probePort || probePort < 1 || probePort > 65535) { setAlert("探针端口必须在 1-65535 之间"); return; }
   if (!probeTimeout || probeTimeout < 100) { setAlert("超时不能小于 100ms"); return; }
   if (!maxLoad1 || maxLoad1 < 0.5) { setAlert("最大 load1 负载阈值不能小于 0.5"); return; }
+  if (!graceSecs || graceSecs < 30) { setAlert("断线宽限期不能小于 30 秒"); return; }
   const body = buildProviderUpdatePayload({
     probe_port: probePort,
     probe_timeout_ms: probeTimeout,
@@ -832,6 +836,7 @@ async function saveProbeSettings() {
     probe_exclude_icp_required: !$("#probe-allow-icp").checked,
     probe_exclude_whitelist_and_ban_overseas: $("#probe-exclude-wl").checked,
     probe_max_load1: maxLoad1,
+    failover_disconnect_grace_secs: graceSecs,
   });
   try {
     state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });

@@ -45,6 +45,7 @@ pub struct FrpcManager {
     tx: broadcast::Sender<FrpcEvent>,
     max_logs: usize,
     generation: Arc<AtomicU64>,
+    disconnected_at: Arc<RwLock<Option<DateTime<Utc>>>>,
 }
 
 impl FrpcManager {
@@ -63,6 +64,8 @@ impl FrpcManager {
                 config_path: config.display().to_string(),
                 config_revision: None,
                 started_at: None,
+                last_connected_at: None,
+                disconnected_since: None,
                 last_error: None,
             })),
             tunnel_states: Arc::new(RwLock::new(HashMap::new())),
@@ -73,6 +76,7 @@ impl FrpcManager {
             tx,
             max_logs: max_logs.max(100),
             generation: Arc::new(AtomicU64::new(0)),
+            disconnected_at: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -82,6 +86,24 @@ impl FrpcManager {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    pub async fn disconnected_duration(&self) -> Option<Duration> {
+        let since = *self.disconnected_at.read().await;
+        since.and_then(|ts| (Utc::now() - ts).to_std().ok())
+    }
+
+    pub fn node_fault_event(&self, raw: impl Into<String>) -> FrpcEvent {
+        FrpcEvent {
+            at: Utc::now(),
+            runtime_generation: self.generation(),
+            raw: raw.into(),
+            proxy_name: None,
+            event_type: FrpcEventType::ServerConnectionFailure,
+            fault_domain: FaultDomain::Node,
+            severity: "critical".into(),
+            triggers_failover: true,
+        }
     }
 
     pub async fn status(&self) -> FrpcRuntimeStatus {
@@ -100,10 +122,16 @@ impl FrpcManager {
             }
         }
         if let Some(reason) = exit_reason {
+            let now = Utc::now();
+            let mut disc = self.disconnected_at.write().await;
             let mut runtime = self.runtime.write().await;
             runtime.running = false;
             runtime.pid = None;
             runtime.connected = false;
+            if disc.is_none() {
+                *disc = Some(now);
+                runtime.disconnected_since = Some(now.to_rfc3339());
+            }
             runtime.last_error = Some(reason);
         }
         self.runtime.read().await.clone()
@@ -205,11 +233,15 @@ impl FrpcManager {
         let stderr = child.stderr.take();
 
         {
+            let now = Utc::now();
+            let mut disc = self.disconnected_at.write().await;
+            *disc = Some(now);
             let mut runtime = self.runtime.write().await;
             runtime.running = true;
             runtime.pid = pid;
             runtime.connected = false;
-            runtime.started_at = Some(Utc::now().to_rfc3339());
+            runtime.started_at = Some(now.to_rfc3339());
+            runtime.disconnected_since = Some(now.to_rfc3339());
             runtime.last_error = None;
         }
 
@@ -233,10 +265,12 @@ impl FrpcManager {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
+        *self.disconnected_at.write().await = None;
         let mut runtime = self.runtime.write().await;
         runtime.running = false;
         runtime.pid = None;
         runtime.connected = false;
+        runtime.disconnected_since = None;
         Ok(())
     }
 
@@ -339,15 +373,24 @@ impl FrpcManager {
         event.runtime_generation = generation;
 
         {
+            let now = Utc::now();
+            let mut disc = self.disconnected_at.write().await;
             let mut runtime = self.runtime.write().await;
             match event.event_type {
                 FrpcEventType::LoginSuccess => {
                     runtime.connected = true;
                     runtime.last_error = None;
+                    runtime.last_connected_at = Some(now.to_rfc3339());
+                    runtime.disconnected_since = None;
+                    *disc = None;
                 }
-                FrpcEventType::ServerConnectionFailure => {
+                FrpcEventType::ServerConnectionFailure | FrpcEventType::NetworkAmbiguous => {
                     runtime.connected = false;
                     runtime.last_error = Some(event.raw.clone());
+                    if disc.is_none() {
+                        *disc = Some(now);
+                        runtime.disconnected_since = Some(now.to_rfc3339());
+                    }
                 }
                 FrpcEventType::AuthFailure | FrpcEventType::ConfigMismatch => {
                     runtime.last_error = Some(event.raw.clone());
@@ -456,5 +499,34 @@ mod tests {
             .await
             .expect("stop without child should succeed");
         assert!(manager.generation() > before);
+    }
+
+    #[tokio::test]
+    async fn disconnect_grace_timer_tracks_outage_and_clears_on_login_success() {
+        let manager = super::FrpcManager::new("/missing/frpc", "/missing/frpc.ini", 100);
+        let current_gen = manager.generation();
+        manager
+            .accept_line("login to server success".into(), false, current_gen)
+            .await;
+        assert!(manager.status().await.connected);
+        assert!(manager.disconnected_duration().await.is_none());
+
+        manager
+            .accept_line(
+                "connect to server error: dial tcp 1.2.3.4:7000: i/o timeout".into(),
+                false,
+                current_gen,
+            )
+            .await;
+        let st = manager.status().await;
+        assert!(!st.connected);
+        assert!(st.disconnected_since.is_some());
+        assert!(manager.disconnected_duration().await.is_some());
+
+        manager
+            .accept_line("login to server success".into(), false, current_gen)
+            .await;
+        assert!(manager.status().await.connected);
+        assert!(manager.disconnected_duration().await.is_none());
     }
 }

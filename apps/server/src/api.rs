@@ -177,14 +177,37 @@ async fn ready(State(state): State<ApiState>) -> ApiResult<serde_json::Value> {
     }))
 }
 
+async fn compute_require_web(state: &ApiState) -> Result<bool, ApiError> {
+    let plans = state.app.db.list_tunnels().await?;
+    if plans.is_empty() {
+        Ok(state
+            .app
+            .chml
+            .list_tunnels()
+            .await
+            .map(|tunnels| {
+                tunnels
+                    .iter()
+                    .any(|t| matches!(t.port_type.to_ascii_lowercase().as_str(), "http" | "https"))
+            })
+            .unwrap_or(true))
+    } else {
+        Ok(plans.iter().any(|p| {
+            p.enabled && matches!(p.protocol.to_ascii_lowercase().as_str(), "http" | "https")
+        }))
+    }
+}
+
 async fn dashboard(State(state): State<ApiState>) -> ApiResult<DashboardSnapshot> {
     let routing = state.app.db.routing_state().await?;
     let active = dashboard_node(&state, routing.active_node.as_deref()).await?;
     let standby = dashboard_node(&state, routing.standby_node.as_deref()).await?;
+    let require_web = compute_require_web(&state).await.unwrap_or(true);
 
     Ok(Json(ApiResponse {
         data: DashboardSnapshot {
             routing,
+            require_web,
             active_node: active,
             standby_node: standby,
             frpc: state.app.frpc.status().await,
@@ -468,6 +491,7 @@ async fn sso_login_chmlfrp(
             probe_exclude_whitelist_and_ban_overseas: saved
                 .probe_exclude_whitelist_and_ban_overseas,
             probe_max_load1: saved.probe_max_load1,
+            failover_disconnect_grace_secs: saved.failover_disconnect_grace_secs.max(30) as u64,
         };
         if let Err(err) = state.coordinator.apply_provider_settings(&update).await {
             return match err {
@@ -1461,24 +1485,7 @@ async fn probe_nodes(State(state): State<ApiState>) -> ApiResult<serde_json::Val
         node.quarantined_until = state.app.db.quarantine_until(&node.name).await?;
     }
     let settings = state.app.db.provider_settings().await?;
-    let plans = state.app.db.list_tunnels().await?;
-    let require_web = if plans.is_empty() {
-        state
-            .app
-            .chml
-            .list_tunnels()
-            .await
-            .map(|tunnels| {
-                tunnels
-                    .iter()
-                    .any(|t| matches!(t.port_type.to_ascii_lowercase().as_str(), "http" | "https"))
-            })
-            .unwrap_or(true)
-    } else {
-        plans.iter().any(|p| {
-            p.enabled && matches!(p.protocol.to_ascii_lowercase().as_str(), "http" | "https")
-        })
-    };
+    let require_web = compute_require_web(&state).await?;
     let policy = ashan_frp_failover::CandidatePolicy {
         require_web,
         require_high_bandwidth: settings.probe_require_high_bandwidth,
@@ -1545,6 +1552,7 @@ async fn probe_nodes(State(state): State<ApiState>) -> ApiResult<serde_json::Val
                 "node_name": r.node.name,
                 "area": r.node.area,
                 "frps_port": r.probed_port,
+                "require_web": policy.require_web,
                 "web_supported": r.node.web_supported,
                 "avg_rtt_ms": r.avg_rtt_ms,
                 "fastest": r.avg_rtt_ms.is_some_and(|rtt| (rtt - best_rtt).abs() < 0.001),

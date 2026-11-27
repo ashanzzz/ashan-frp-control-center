@@ -36,6 +36,7 @@ pub struct ProviderSettings {
     pub probe_exclude_icp_required: bool,
     pub probe_exclude_whitelist_and_ban_overseas: bool,
     pub probe_max_load1: f64,
+    pub failover_disconnect_grace_secs: i64,
 }
 
 impl ProviderSettings {
@@ -59,6 +60,7 @@ impl ProviderSettings {
             probe_exclude_icp_required: self.probe_exclude_icp_required,
             probe_exclude_whitelist_and_ban_overseas: self.probe_exclude_whitelist_and_ban_overseas,
             probe_max_load1: self.probe_max_load1,
+            failover_disconnect_grace_secs: self.failover_disconnect_grace_secs.max(30) as u64,
         }
     }
 }
@@ -104,7 +106,8 @@ impl Database {
              cloudflare_api_base,cloudflare_api_token,cloudflare_zone_id,updated_at,\
              probe_port,probe_timeout_ms,probe_latency_tolerance_ms,\
              probe_require_high_bandwidth,probe_exclude_icp_required,\
-             probe_exclude_whitelist_and_ban_overseas,probe_max_load1 \
+             probe_exclude_whitelist_and_ban_overseas,probe_max_load1,\
+             failover_disconnect_grace_secs \
              FROM provider_settings WHERE singleton_id=1",
         )
         .fetch_one(&self.pool)
@@ -130,6 +133,7 @@ impl Database {
                 .get::<i64, _>("probe_exclude_whitelist_and_ban_overseas")
                 != 0,
             probe_max_load1: row.get("probe_max_load1"),
+            failover_disconnect_grace_secs: row.get("failover_disconnect_grace_secs"),
         })
     }
 
@@ -278,6 +282,7 @@ impl Database {
              probe_port=?,probe_timeout_ms=?,probe_latency_tolerance_ms=?,\
              probe_require_high_bandwidth=?,probe_exclude_icp_required=?,\
              probe_exclude_whitelist_and_ban_overseas=?,probe_max_load1=?,\
+             failover_disconnect_grace_secs=?,\
              env_bootstrap_complete=1,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
         )
         .bind(input.chmlfrp_base_url.trim().trim_end_matches('/'))
@@ -297,6 +302,7 @@ impl Database {
         .bind(input.probe_exclude_icp_required as i64)
         .bind(input.probe_exclude_whitelist_and_ban_overseas as i64)
         .bind(input.probe_max_load1.max(0.5))
+        .bind(input.failover_disconnect_grace_secs.max(30) as i64)
         .execute(&self.pool)
         .await?;
         self.provider_settings().await
