@@ -10,6 +10,26 @@ use ashan_frp_frpc_runtime::ReadinessError;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+pub async fn require_web(state: &Arc<AppState>) -> Result<bool> {
+    let plans = state.db.list_tunnels().await?;
+    if plans.is_empty() {
+        Ok(state
+            .chml
+            .list_tunnels()
+            .await
+            .map(|tunnels| {
+                tunnels
+                    .iter()
+                    .any(|t| matches!(t.port_type.to_ascii_lowercase().as_str(), "http" | "https"))
+            })
+            .unwrap_or(true))
+    } else {
+        Ok(plans.iter().any(|p| {
+            p.enabled && matches!(p.protocol.to_ascii_lowercase().as_str(), "http" | "https")
+        }))
+    }
+}
+
 pub async fn build_rows(state: &Arc<AppState>) -> Result<Vec<TunnelRow>> {
     let plans = state.db.list_tunnels().await?;
     let chmlfrp_configured = state.chml.configured();

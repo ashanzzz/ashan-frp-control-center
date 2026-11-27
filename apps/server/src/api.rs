@@ -6,14 +6,16 @@ use crate::{
 use ashan_frp_chmlfrp::{ChmlFrpClient, ChmlFrpConfig, RemoteTunnel, RemoteTunnelMutation};
 use ashan_frp_cloudflare::{CloudflareClient, CloudflareZone, DnsRecord, DnsRecordMutation};
 use ashan_frp_domain::{
-    ApiResponse, DashboardSnapshot, ErrorResponse, ProviderHealth, ProviderSettingsUpdate,
-    ProviderSettingsView, RoutingUpdate, TunnelPlan, TunnelPlanInput,
+    ApiResponse, DashboardSnapshot, ErrorResponse, ProviderHealth, ProviderSettingsPatch,
+    ProviderSettingsUpdate, ProviderSettingsView, RoutingUpdate, TunnelPlan, TunnelPlanInput,
 };
 use ashan_frp_node_probe::{ProbeSettings, probe_and_rank};
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
+    body::Bytes,
+    extract::{Path, Request, State},
+    http::{StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response, Sse},
     routing::{get, post, put},
 };
@@ -32,6 +34,10 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
     let state = ApiState { app, coordinator };
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/auth/verify", post(verify_control_auth))
+        .route("/api/v1/auth/key", put(rotate_control_auth_key))
+        .route("/api/v1/capabilities", get(capabilities))
+        .route("/llms.txt", get(llms_txt))
         .route("/api/v1/ready", get(ready))
         .route("/api/v1/dashboard", get(dashboard))
         .route("/api/v1/tunnels", get(list_tunnels).post(create_tunnel))
@@ -42,7 +48,9 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
         .route("/api/v1/routing", get(routing).put(update_routing))
         .route(
             "/api/v1/settings/providers",
-            get(provider_settings).put(update_provider_settings),
+            get(provider_settings)
+                .put(update_provider_settings)
+                .patch(patch_provider_settings),
         )
         .route(
             "/api/v1/settings/providers/test/chmlfrp",
@@ -92,6 +100,7 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
         .route("/api/v1/nodes", get(nodes))
         .route("/api/v1/nodes/{name}/unquarantine", post(unquarantine_node))
         .route("/api/v1/nodes/probe", post(probe_nodes))
+        .route("/api/v1/nodes/switch-fastest", post(switch_fastest_node))
         .route("/api/v1/reconcile", post(reconcile_all))
         .route("/api/v1/failover", post(manual_failover))
         .route("/api/v1/frpc/status", get(frpc_status))
@@ -100,6 +109,10 @@ pub fn router(app: Arc<AppState>, coordinator: Coordinator) -> Router {
         .route("/api/v1/frpc/stop", post(frpc_stop))
         .route("/api/v1/frpc/restart", post(frpc_restart))
         .route("/api/v1/events", get(events))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_control_auth,
+        ))
         .with_state(state)
 }
 
@@ -160,12 +173,167 @@ impl IntoResponse for ApiError {
     }
 }
 
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0_u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+fn extract_control_token(req: &Request) -> Option<String> {
+    if let Some(auth) = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        && let Some(token) = auth.strip_prefix("Bearer ").map(str::trim)
+        && !token.is_empty()
+    {
+        return Some(token.to_owned());
+    }
+    if let Some(key) = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(key.to_owned());
+    }
+    if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=')
+                && k == "api_key"
+                && !v.trim().is_empty()
+            {
+                return Some(v.trim().to_owned());
+            }
+        }
+    }
+    None
+}
+
+async fn require_control_auth(State(state): State<ApiState>, req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    if path == "/api/v1/health" || path == "/api/v1/auth/verify" {
+        return next.run(req).await;
+    }
+    let expected = state.app.control_api_key.read().await.clone();
+    let authorized = extract_control_token(&req)
+        .is_some_and(|provided| constant_time_eq(&provided, expected.trim()));
+    if authorized {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                code: "UNAUTHORIZED".into(),
+                message: "需要 Control Center API Key（Authorization: Bearer <key> 或 X-API-Key）"
+                    .into(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AuthKeyInput {
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+async fn verify_control_auth(
+    State(state): State<ApiState>,
+    headers: axum::http::HeaderMap,
+    bytes: Bytes,
+) -> ApiResult<serde_json::Value> {
+    let from_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
+    let from_body = if bytes.is_empty() {
+        None
+    } else {
+        serde_json::from_slice::<AuthKeyInput>(&bytes)
+            .ok()
+            .and_then(|i| i.api_key)
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+    };
+    let provided = from_header.or(from_body).unwrap_or_default();
+    let expected = state.app.control_api_key.read().await.clone();
+    if !provided.is_empty() && constant_time_eq(&provided, expected.trim()) {
+        Ok(Json(ApiResponse {
+            data: serde_json::json!({"ok": true}),
+        }))
+    } else {
+        Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            code: "UNAUTHORIZED",
+            message: "API Key 无效".into(),
+        })
+    }
+}
+
+async fn rotate_control_auth_key(
+    State(state): State<ApiState>,
+    bytes: Bytes,
+) -> ApiResult<serde_json::Value> {
+    let input: AuthKeyInput = if bytes.is_empty() {
+        AuthKeyInput::default()
+    } else {
+        serde_json::from_slice(&bytes)
+            .map_err(|err| ApiError::bad_request(format!("invalid JSON: {err}")))?
+    };
+    let next_key = match input
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(custom) => custom.to_owned(),
+        None => format!(
+            "ashan_{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        ),
+    };
+    state
+        .app
+        .db
+        .set_control_api_key(&next_key)
+        .await
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    *state.app.control_api_key.write().await = next_key.clone();
+    state
+        .app
+        .db
+        .activity(
+            None,
+            "control_auth",
+            "warning",
+            "Control Center API Key 已更新",
+            None,
+            None,
+            serde_json::json!({"rotated": true}),
+        )
+        .await?;
+    Ok(Json(ApiResponse {
+        data: serde_json::json!({"ok": true, "api_key": next_key}),
+    }))
+}
+
 async fn health(State(state): State<ApiState>) -> ApiResult<serde_json::Value> {
     Ok(Json(ApiResponse {
         data: serde_json::json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
             "frpc": state.app.frpc.status().await.running,
+            "auth_required": true,
         }),
     }))
 }
@@ -178,24 +346,9 @@ async fn ready(State(state): State<ApiState>) -> ApiResult<serde_json::Value> {
 }
 
 async fn compute_require_web(state: &ApiState) -> Result<bool, ApiError> {
-    let plans = state.app.db.list_tunnels().await?;
-    if plans.is_empty() {
-        Ok(state
-            .app
-            .chml
-            .list_tunnels()
-            .await
-            .map(|tunnels| {
-                tunnels
-                    .iter()
-                    .any(|t| matches!(t.port_type.to_ascii_lowercase().as_str(), "http" | "https"))
-            })
-            .unwrap_or(true))
-    } else {
-        Ok(plans.iter().any(|p| {
-            p.enabled && matches!(p.protocol.to_ascii_lowercase().as_str(), "http" | "https")
-        }))
-    }
+    reconcile::require_web(&state.app)
+        .await
+        .map_err(ApiError::from)
 }
 
 async fn dashboard(State(state): State<ApiState>) -> ApiResult<DashboardSnapshot> {
@@ -364,13 +517,13 @@ async fn provider_settings(State(state): State<ApiState>) -> ApiResult<ProviderS
     }))
 }
 
-async fn update_provider_settings(
-    State(state): State<ApiState>,
-    Json(input): Json<ProviderSettingsUpdate>,
+async fn apply_settings_update(
+    state: &ApiState,
+    input: &ProviderSettingsUpdate,
 ) -> ApiResult<ProviderSettingsView> {
     validate_api_base("ChmlFrp API Base", &input.chmlfrp_base_url)?;
     validate_api_base("Cloudflare API Base", &input.cloudflare_api_base)?;
-    let view = match state.coordinator.apply_provider_settings(&input).await {
+    let view = match state.coordinator.apply_provider_settings(input).await {
         Ok(view) => view,
         Err(ProviderSettingsApplyError::Busy) => {
             return Err(ApiError::conflict(
@@ -380,6 +533,22 @@ async fn update_provider_settings(
         Err(ProviderSettingsApplyError::Other(error)) => return Err(ApiError::from(error)),
     };
     Ok(Json(ApiResponse { data: view }))
+}
+
+async fn update_provider_settings(
+    State(state): State<ApiState>,
+    Json(input): Json<ProviderSettingsUpdate>,
+) -> ApiResult<ProviderSettingsView> {
+    apply_settings_update(&state, &input).await
+}
+
+async fn patch_provider_settings(
+    State(state): State<ApiState>,
+    Json(patch): Json<ProviderSettingsPatch>,
+) -> ApiResult<ProviderSettingsView> {
+    let saved = state.app.db.provider_settings().await?.view();
+    let update = patch.into_update(&saved);
+    apply_settings_update(&state, &update).await
 }
 
 async fn test_chmlfrp(
@@ -1569,4 +1738,193 @@ async fn probe_nodes(State(state): State<ApiState>) -> ApiResult<serde_json::Val
     Ok(Json(ApiResponse {
         data: serde_json::json!(data),
     }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SwitchFastestInput {
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    min_improvement_ms: Option<f64>,
+}
+
+async fn switch_fastest_node(
+    State(state): State<ApiState>,
+    bytes: Bytes,
+) -> ApiResult<crate::coordinator::SwitchFastestReport> {
+    let input: SwitchFastestInput = if bytes.is_empty() {
+        SwitchFastestInput::default()
+    } else {
+        serde_json::from_slice(&bytes)
+            .map_err(|err| ApiError::bad_request(format!("invalid JSON: {err}")))?
+    };
+    let min_gain = input.min_improvement_ms.unwrap_or(0.0).max(0.0);
+    let report = state
+        .coordinator
+        .switch_to_fastest(input.dry_run, min_gain, "api")
+        .await?;
+    Ok(Json(ApiResponse { data: report }))
+}
+
+async fn capabilities(State(state): State<ApiState>) -> ApiResult<serde_json::Value> {
+    let routing = state.app.db.routing_state().await?;
+    let settings = state.app.db.provider_settings().await?.view();
+    let plans = state.app.db.list_tunnels().await?;
+    let require_web = compute_require_web(&state).await.unwrap_or(true);
+    Ok(Json(ApiResponse {
+        data: serde_json::json!({
+            "service": "ashan-frp-control-center",
+            "version": env!("CARGO_PKG_VERSION"),
+            "auth": {
+                "required": true,
+                "headers": ["Authorization: Bearer <key>", "X-API-Key: <key>"],
+                "sse_query_param": "api_key",
+                "exempt_paths": ["/api/v1/health", "/api/v1/auth/verify"]
+            },
+            "current_state": {
+                "active_node": routing.active_node,
+                "standby_node": routing.standby_node,
+                "routing_phase": routing.state,
+                "failover_enabled": routing.failover_enabled,
+                "require_web": require_web,
+                "managed_tunnels": plans.len(),
+                "settings": settings,
+            },
+            "invariants": [
+                "所有受管隧道始终共享同一个全局 ACTIVE ChmlFrp 节点，不存在单隧道分节点",
+                "FRPC 连续断线超过 failover_disconnect_grace_secs（默认 600s/10分钟）或经 API 确认异常后触发 GLOBAL_FAILOVER",
+                "Failover / switch-fastest 按真实 FRPS 端口测速，排除被攻击/禁网盘(如开启)/高负载/需过白封海外节点，并严格按低延迟优先",
+                "switch-fastest 若检测到当前节点已是合规最快节点或差距小于阈值，则直接跳过，不重启 FRPC 也不中断网盘连接",
+                "Cloudflare受管 A 记录仅在目标节点 FRPC 全量就绪后才更新"
+            ],
+            "endpoints": [
+                {"method": "GET", "path": "/api/v1/health", "auth": false, "summary": "进程存活与版本号"},
+                {"method": "POST", "path": "/api/v1/auth/verify", "auth": false, "summary": "验证 API Key 是否有效"},
+                {"method": "PUT", "path": "/api/v1/auth/key", "auth": true, "summary": "更新或随机轮换控制面 API Key，可选 {api_key}"},
+                {"method": "GET", "path": "/api/v1/capabilities", "auth": true, "summary": "AI 自描述能力清单、当前状态与接口规范"},
+                {"method": "GET", "path": "/llms.txt", "auth": true, "summary": "Markdown 版 AI 操作手册"},
+                {"method": "GET", "path": "/api/v1/dashboard", "auth": true, "summary": "控制面全量聚合快照（含 require_web、active_node.web_supported、frpc.disconnected_since 等）"},
+                {"method": "GET", "path": "/api/v1/nodes", "auth": true, "summary": "ChmlFrp 全部节点列表（含 frps_port、web_supported、tags、policy、load1、notes）"},
+                {"method": "POST", "path": "/api/v1/nodes/probe", "auth": true, "summary": "按真实端口并发 TCP 探针测速所有在线节点，返回 fastest/recommended/eligible/ineligible_reasons"},
+                {"method": "POST", "path": "/api/v1/nodes/switch-fastest", "auth": true, "summary": "测速并在存在明显更快合规节点时切换（当前已最快则跳过）；body 可选 {dry_run, min_improvement_ms}"},
+                {"method": "POST", "path": "/api/v1/failover", "auth": true, "summary": "手动执行全局故障切换"},
+                {"method": "POST", "path": "/api/v1/reconcile", "auth": true, "summary": "全局一致性同步（ChmlFrp -> FRPC -> Cloudflare）"},
+                {"method": "GET", "path": "/api/v1/tunnels", "auth": true, "summary": "查看受管计划列表"},
+                {"method": "POST", "path": "/api/v1/tunnels", "auth": true, "summary": "新建受管计划"},
+                {"method": "POST", "path": "/api/v1/tunnels/import-all", "auth": true, "summary": "批量导入 ChmlFrp 远端未纳管隧道"},
+                {"method": "GET|PUT|PATCH", "path": "/api/v1/settings/providers", "auth": true, "summary": "读取、全量更新或局部 PATCH 更新探针/策略/周期优化/Provider 配置（绝不返回明文密钥）"},
+                {"method": "POST", "path": "/api/v1/settings/providers/chmlfrp/sso/login", "auth": true, "summary": "执行轻爪 OAuth2 SSO + 2FA 自动登录并持久化 Token"},
+                {"method": "GET", "path": "/api/v1/frpc/status|logs", "auth": true, "summary": "查看内置 FRPC 状态与最新日志"},
+                {"method": "POST", "path": "/api/v1/frpc/start|stop|restart", "auth": true, "summary": "控制内置 FRPC 进程"},
+                {"method": "GET", "path": "/api/v1/dns/records", "auth": true, "summary": "读取/管理 Cloudflare DNS 记录"},
+                {"method": "GET", "path": "/api/v1/events", "auth": true, "summary": "FRPC SSE 日志流（传 ?api_key=）"}
+            ]
+        }),
+    }))
+}
+
+async fn llms_txt(State(state): State<ApiState>) -> impl IntoResponse {
+    let routing = state.app.db.routing_state().await.ok();
+    let settings = state
+        .app
+        .db
+        .provider_settings()
+        .await
+        .ok()
+        .map(|s| s.view());
+    let require_web = compute_require_web(&state).await.unwrap_or(true);
+    let active = routing
+        .as_ref()
+        .and_then(|r| r.active_node.as_deref())
+        .unwrap_or("未初始化");
+    let standby = routing
+        .as_ref()
+        .and_then(|r| r.standby_node.as_deref())
+        .unwrap_or("未配置");
+    let weekly_desc = settings
+        .as_ref()
+        .map(|s| {
+            format!(
+                "enabled={}, weekday={}(0=Sun), hour={} (UTC+8), min_gain={}ms",
+                s.weekly_optimize_enabled,
+                s.weekly_optimize_weekday,
+                s.weekly_optimize_hour,
+                s.weekly_optimize_min_improvement_ms
+            )
+        })
+        .unwrap_or_default();
+
+    let body = format!(
+        "# Ashan FRP Control Center — AI Operation Guide (v{})\n\n\
+## Authentication\n\
+Every endpoint except `/api/v1/health` and `/api/v1/auth/verify` requires `Authorization: Bearer <API_KEY>` or `X-API-Key: <API_KEY>` (SSE `/api/v1/events` uses `?api_key=<API_KEY>`).\n\n\
+## Current Status\n\
+- ACTIVE Node: {active}\n\
+- STANDBY Node: {standby}\n\
+- Web Support Required (`require_web`): {require_web}\n\
+- Weekly Speed Optimizer: {weekly_desc}\n\n\
+## Recommended AI Workflows\n\
+1. **Inspect everything**: `GET /api/v1/dashboard` and `GET /api/v1/capabilities`\n\
+2. **Benchmark all nodes on real FRPS ports**: `POST /api/v1/nodes/probe` (check `recommended`, `eligible`, `web_supported`, `require_web`, `avg_rtt_ms`, `tags`)\n\
+3. **Preview or switch to fastest compliant node**:\n\
+   - Dry-run preview: `POST /api/v1/nodes/switch-fastest` with `{{\"dry_run\": true}}`\n\
+   - Execute switch (no-ops cleanly if current ACTIVE is already fastest): `POST /api/v1/nodes/switch-fastest` with `{{\"min_improvement_ms\": 15}}`\n\
+4. **Partial config update**: `PATCH /api/v1/settings/providers` with only fields to change, e.g. `{{\"probe_latency_tolerance_ms\": 0, \"failover_disconnect_grace_secs\": 600}}`\n\
+5. **Emergency converge**: `POST /api/v1/reconcile` (ChmlFrp -> FRPC -> Cloudflare DNS)\n\n\
+## Invariants\n\
+- All managed tunnels share ONE global ACTIVE node.\n\
+- Disconnect failover triggers after `failover_disconnect_grace_secs` continuous downtime (default 600s) or API-confirmed offline/attacked state.\n\
+- Unreachable/attacked/drive-forbidden/overloaded candidates are automatically excluded and rolled forward if readiness times out.\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        body,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{constant_time_eq, extract_control_token};
+    use axum::{body::Body, http::Request};
+
+    #[test]
+    fn constant_time_eq_verifies_exact_matches() {
+        assert!(constant_time_eq("ashan_secret_123", "ashan_secret_123"));
+        assert!(!constant_time_eq("ashan_secret_123", "ashan_secret_124"));
+        assert!(!constant_time_eq("ashan_secret", "ashan_secret_123"));
+    }
+
+    #[test]
+    fn extracts_token_from_bearer_header_or_query() {
+        let req_bearer = Request::builder()
+            .uri("/api/v1/dashboard")
+            .header("Authorization", "Bearer ashan_abc")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            extract_control_token(&req_bearer).as_deref(),
+            Some("ashan_abc")
+        );
+
+        let req_header = Request::builder()
+            .uri("/api/v1/dashboard")
+            .header("X-API-Key", "ashan_xyz")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            extract_control_token(&req_header).as_deref(),
+            Some("ashan_xyz")
+        );
+
+        let req_query = Request::builder()
+            .uri("/api/v1/events?api_key=ashan_sse")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            extract_control_token(&req_query).as_deref(),
+            Some("ashan_sse")
+        );
+    }
 }

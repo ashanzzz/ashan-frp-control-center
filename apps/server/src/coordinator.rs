@@ -6,7 +6,9 @@ use ashan_frp_domain::{
     FrpcEvent, FrpcEventType, ProviderSettingsUpdate, ProviderSettingsView, RoutingPhase,
     TunnelPlan,
 };
-use ashan_frp_failover::{CandidatePolicy, ordered_candidates_with_policy};
+use ashan_frp_failover::{
+    CandidatePolicy, ineligible_reasons, ordered_candidates_with_policy, sort_by_latency,
+};
 use ashan_frp_frpc_runtime::ReadinessError;
 use ashan_frp_node_probe::{ProbeSettings, probe_and_rank};
 use sha2::{Digest, Sha256};
@@ -15,6 +17,20 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SwitchFastestReport {
+    pub dry_run: bool,
+    pub switched: bool,
+    pub active_before: String,
+    pub active_after: String,
+    pub active_rtt_ms: Option<f64>,
+    pub best_node: Option<String>,
+    pub best_rtt_ms: Option<f64>,
+    pub improvement_ms: Option<f64>,
+    pub reason: String,
+    pub job_id: Option<String>,
+}
 
 #[derive(Debug, Error)]
 enum MigrationError {
@@ -248,6 +264,377 @@ impl Coordinator {
             });
         }
         Ok(())
+    }
+
+    /// Background weekly speed-optimization scheduler (default: Sunday 03:xx Asia/Shanghai).
+    /// Probes all compliant nodes and switches ONLY if a meaningfully faster node is found;
+    /// if the active node is already optimal, skips without touching FRPC/tunnels/DNS.
+    pub fn spawn_weekly_speed_optimizer(&self) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                if let Err(err) = me.weekly_optimize_tick().await {
+                    warn!(error = %err, "weekly speed optimizer tick failed");
+                }
+            }
+        });
+    }
+
+    async fn weekly_optimize_tick(&self) -> Result<()> {
+        let settings = self.state.db.provider_settings().await?;
+        if !settings.weekly_optimize_enabled {
+            return Ok(());
+        }
+        let routing = self.state.db.routing_state().await?;
+        if routing.active_node.is_none() || routing.state == RoutingPhase::Failover {
+            return Ok(());
+        }
+        let plans = self.state.db.list_tunnels().await?;
+        if !plans.iter().any(|p| p.enabled) {
+            return Ok(());
+        }
+
+        let (cst_weekday, cst_hour, now_rfc3339) =
+            ashan_frp_database::shanghai_weekday_hour_and_rfc3339();
+        let target_weekday = (settings.weekly_optimize_weekday.clamp(0, 6)) as u8;
+        let target_hour = (settings.weekly_optimize_hour.clamp(0, 23)) as u8;
+        if cst_weekday != target_weekday || cst_hour != target_hour {
+            return Ok(());
+        }
+
+        if let Some(hours) =
+            ashan_frp_database::hours_since_rfc3339(&settings.last_weekly_optimize_at)
+            && hours < 20
+        {
+            return Ok(());
+        }
+
+        self.state.db.mark_weekly_optimize_ran(&now_rfc3339).await?;
+        let report = self
+            .switch_to_fastest(
+                false,
+                settings.weekly_optimize_min_improvement_ms.max(0.0),
+                "weekly_schedule",
+            )
+            .await?;
+        info!(
+            switched = report.switched,
+            active_before = %report.active_before,
+            active_after = %report.active_after,
+            reason = %report.reason,
+            "weekly speed optimization completed"
+        );
+        Ok(())
+    }
+
+    /// Probe all compliant nodes (including current `active_node`) on real FRPS ports and switch
+    /// strictly to the lowest-latency compliant candidate if it improves by at least
+    /// `min_improvement_ms` (or if `active_node` itself no longer passes policy).
+    pub async fn switch_to_fastest(
+        &self,
+        dry_run: bool,
+        min_improvement_ms: f64,
+        source: &str,
+    ) -> Result<SwitchFastestReport> {
+        let _guard = self
+            .lock
+            .try_lock()
+            .map_err(|_| anyhow!("GLOBAL_FAILOVER or reconcile already running"))?;
+
+        let routing = self.state.db.routing_state().await?;
+        let active = routing
+            .active_node
+            .clone()
+            .ok_or_else(|| anyhow!("no active node configured"))?;
+        let settings = self.state.db.provider_settings().await?;
+        let require_web = reconcile::require_web(&self.state).await?;
+        let policy = CandidatePolicy {
+            require_web,
+            require_high_bandwidth: settings.probe_require_high_bandwidth,
+            exclude_icp_required: settings.probe_exclude_icp_required,
+            exclude_whitelist_and_ban_overseas: settings.probe_exclude_whitelist_and_ban_overseas,
+            max_load1: settings.probe_max_load1,
+        };
+
+        let mut nodes = self
+            .state
+            .chml
+            .list_nodes()
+            .await
+            .context("list ChmlFrp nodes for speed check")?;
+        for node in &mut nodes {
+            node.quarantined_until = self.state.db.quarantine_until(&node.name).await?;
+        }
+
+        let active_eligible = nodes
+            .iter()
+            .find(|n| n.name == active)
+            .is_some_and(|n| ineligible_reasons(n, &policy).is_empty());
+
+        let compliant: Vec<_> = nodes
+            .into_iter()
+            .filter(|n| ineligible_reasons(n, &policy).is_empty())
+            .collect();
+        if compliant.is_empty() {
+            return Ok(SwitchFastestReport {
+                dry_run,
+                switched: false,
+                active_before: active.clone(),
+                active_after: active,
+                active_rtt_ms: None,
+                best_node: None,
+                best_rtt_ms: None,
+                improvement_ms: None,
+                reason: "当前没有满足建站/网盘/稳定性策略的合规节点，保留当前节点不切换".into(),
+                job_id: None,
+            });
+        }
+
+        let probe_cfg = ProbeSettings {
+            probe_port: settings.probe_port.clamp(1, 65535) as u16,
+            probe_timeout_ms: settings.probe_timeout_ms.max(100) as u64,
+            probe_latency_tolerance_ms: 0,
+        };
+        let ranked = probe_and_rank(&compliant, &probe_cfg)
+            .await
+            .context("probe compliant nodes")?;
+        let probe_pairs: Vec<ashan_frp_failover::ProbeResult> = ranked
+            .iter()
+            .map(|r| ashan_frp_failover::ProbeResult {
+                node_name: r.node.name.clone(),
+                avg_rtt_ms: r.avg_rtt_ms,
+            })
+            .collect();
+        let active_rtt_ms = ranked
+            .iter()
+            .find(|r| r.node.name == active)
+            .and_then(|r| r.avg_rtt_ms);
+
+        let reachable_nodes: Vec<_> = ranked
+            .iter()
+            .filter(|r| r.avg_rtt_ms.is_some())
+            .map(|r| r.node.clone())
+            .collect();
+        let sorted = sort_by_latency(reachable_nodes, &probe_pairs, None, 0);
+        let Some(best) = sorted.first().cloned() else {
+            return Ok(SwitchFastestReport {
+                dry_run,
+                switched: false,
+                active_before: active.clone(),
+                active_after: active,
+                active_rtt_ms,
+                best_node: None,
+                best_rtt_ms: None,
+                improvement_ms: None,
+                reason: "所有合规节点本次 TCP 测速均超时，保持当前连接不动".into(),
+                job_id: None,
+            });
+        };
+        let best_rtt_ms = probe_pairs
+            .iter()
+            .find(|p| p.node_name == best.name)
+            .and_then(|p| p.avg_rtt_ms);
+        let improvement_ms = match (active_rtt_ms, best_rtt_ms) {
+            (Some(a), Some(b)) => Some(a - b),
+            _ => None,
+        };
+
+        let should_skip = active_eligible
+            && (best.name == active
+                || improvement_ms.is_some_and(|gain| gain < min_improvement_ms.max(0.0)));
+        if should_skip {
+            let reason = if best.name == active {
+                format!(
+                    "当前节点 {} 已是合规最快节点 ({:.1} ms)，跳过切换（不打断现有连接）",
+                    active,
+                    active_rtt_ms.unwrap_or(0.0)
+                )
+            } else {
+                format!(
+                    "当前节点 {} ({:.1} ms) 与最快节点 {} ({:.1} ms) 差距小于阈值 {:.1} ms，跳过切换",
+                    active,
+                    active_rtt_ms.unwrap_or(0.0),
+                    best.name,
+                    best_rtt_ms.unwrap_or(0.0),
+                    min_improvement_ms.max(0.0)
+                )
+            };
+            let _ = self
+                .state
+                .db
+                .activity(
+                    None,
+                    "speed_optimize",
+                    "info",
+                    &reason,
+                    None,
+                    Some(&active),
+                    serde_json::json!({
+                        "source": source,
+                        "dry_run": dry_run,
+                        "active_rtt_ms": active_rtt_ms,
+                        "best_node": best.name,
+                        "best_rtt_ms": best_rtt_ms,
+                    }),
+                )
+                .await;
+            return Ok(SwitchFastestReport {
+                dry_run,
+                switched: false,
+                active_before: active.clone(),
+                active_after: active,
+                active_rtt_ms,
+                best_node: Some(best.name),
+                best_rtt_ms,
+                improvement_ms,
+                reason,
+                job_id: None,
+            });
+        }
+
+        if dry_run {
+            let reason = if !active_eligible {
+                format!(
+                    "dry_run 预览：当前节点 {} 已不满足当前策略，建议切换至最快合规节点 {} ({:.1} ms)",
+                    active,
+                    best.name,
+                    best_rtt_ms.unwrap_or(0.0)
+                )
+            } else {
+                format!(
+                    "dry_run 预览：发现更快合规节点 {} ({:.1} ms)，较当前 {} ({:.1} ms) 快 {:.1} ms",
+                    best.name,
+                    best_rtt_ms.unwrap_or(0.0),
+                    active,
+                    active_rtt_ms.unwrap_or(0.0),
+                    improvement_ms.unwrap_or(0.0)
+                )
+            };
+            return Ok(SwitchFastestReport {
+                dry_run: true,
+                switched: false,
+                active_before: active.clone(),
+                active_after: active,
+                active_rtt_ms,
+                best_node: Some(best.name),
+                best_rtt_ms,
+                improvement_ms,
+                reason,
+                job_id: None,
+            });
+        }
+
+        let targets: Vec<_> = sorted.into_iter().filter(|n| n.name != active).collect();
+        if targets.is_empty() {
+            return Ok(SwitchFastestReport {
+                dry_run: false,
+                switched: false,
+                active_before: active.clone(),
+                active_after: active,
+                active_rtt_ms,
+                best_node: Some(best.name),
+                best_rtt_ms,
+                improvement_ms,
+                reason: "没有除当前节点外的其他可达合规候选节点，保留当前节点".into(),
+                job_id: None,
+            });
+        }
+
+        let job = Uuid::new_v4().to_string();
+        *self.state.failover_job.write().await = Some(job.clone());
+        self.state
+            .db
+            .set_routing_phase(RoutingPhase::Failover)
+            .await?;
+
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut migrated_to: Option<String> = None;
+        for (idx, target) in targets.iter().enumerate() {
+            match self
+                .migrate_to(&job, &target.name, Some(active.as_str()), None, true)
+                .await
+            {
+                Ok(()) => {
+                    migrated_to = Some(target.name.clone());
+                    break;
+                }
+                Err(MigrationError::TargetNode(msg)) => {
+                    let _ = self.state.frpc.stop().await;
+                    self.state
+                        .db
+                        .quarantine_node(
+                            &target.name,
+                            target.real_ip.as_deref(),
+                            "SPEED_OPTIMIZE_TARGET_FAILED",
+                            None,
+                            routing.quarantine_days,
+                        )
+                        .await?;
+                    last_err = Some(anyhow!(msg));
+                    if idx + 1 < targets.len() {
+                        let _ = self.recover_manual_original(&job, &active).await;
+                        let _ = self
+                            .state
+                            .db
+                            .set_routing_phase(RoutingPhase::Failover)
+                            .await;
+                    }
+                }
+                Err(err) => {
+                    last_err = Some(err.into());
+                    break;
+                }
+            }
+        }
+
+        if let Some(target_name) = migrated_to {
+            let reason = format!(
+                "已从 {} ({:.1} ms) 择优切换至更快合规节点 {} ({:.1} ms)",
+                active,
+                active_rtt_ms.unwrap_or(0.0),
+                target_name,
+                probe_pairs
+                    .iter()
+                    .find(|p| p.node_name == target_name)
+                    .and_then(|p| p.avg_rtt_ms)
+                    .unwrap_or(0.0)
+            );
+            let _ = self
+                .state
+                .db
+                .activity(
+                    Some(&job),
+                    "speed_optimize",
+                    "info",
+                    &reason,
+                    None,
+                    Some(&target_name),
+                    serde_json::json!({
+                        "source": source,
+                        "active_before": active,
+                        "active_after": target_name,
+                    }),
+                )
+                .await;
+            *self.state.failover_job.write().await = None;
+            return Ok(SwitchFastestReport {
+                dry_run: false,
+                switched: true,
+                active_before: active,
+                active_after: target_name,
+                active_rtt_ms,
+                best_node: Some(best.name),
+                best_rtt_ms,
+                improvement_ms,
+                reason,
+                job_id: Some(job),
+            });
+        }
+
+        let _ = self.recover_manual_original(&job, &active).await;
+        *self.state.failover_job.write().await = None;
+        Err(last_err.unwrap_or_else(|| anyhow!("switch_to_fastest failed on all candidates")))
     }
 
     pub async fn global_failover(&self, trigger: Option<FrpcEvent>) -> Result<String> {

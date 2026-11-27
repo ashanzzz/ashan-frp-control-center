@@ -1,3 +1,5 @@
+const AUTH_STORAGE_KEY = "ashan_control_api_key";
+
 const state = {
   page: "overview",
   dashboard: null,
@@ -12,6 +14,8 @@ const state = {
   lastDeletedDns: null,
   providerFeedback: { chmlfrp: null, cloudflare: null },
   nodeFilter: "all",
+  apiKey: localStorage.getItem(AUTH_STORAGE_KEY) || "",
+  eventSource: null,
   busy: false,
   refreshing: false,
 };
@@ -45,13 +49,25 @@ function simpleBadge(label, kind = "") {
   return `<span class="badge ${kind}">${esc(label)}</span>`;
 }
 
+function showAuthGate(message = "") {
+  const dialog = $("#auth-dialog");
+  if (!dialog) return;
+  $("#auth-error").textContent = message;
+  $("#auth-key-input").value = state.apiKey || "";
+  if (!dialog.open) dialog.showModal();
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (state.apiKey) headers.Authorization = `Bearer ${state.apiKey}`;
+  const response = await fetch(path, { ...options, headers });
   let payload = null;
   try { payload = await response.json(); } catch { /* no body */ }
+  if (response.status === 401 && path !== "/api/v1/auth/verify") {
+    state.apiKey = "";
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+    showAuthGate(payload?.message || "API Key 无效或已失效，请重新验证");
+  }
   if (!response.ok) throw new Error(payload?.message || payload?.error?.message || `HTTP ${response.status}`);
   return payload?.data;
 }
@@ -360,7 +376,7 @@ function renderChmlfrp() {
     return `<tr><td><strong>${esc(node.name)}</strong><small>${esc(node.area)}</small>${renderNodeTags(node)}${notesHtml}</td><td class="mono-cell">${esc(node.real_ip || "—")}${esc(portText)}<small>${esc(node.host || "")}</small></td><td><div>${esc(node.state)}</div><small>负载 ${loadText} · 带宽 ${bwText}</small></td><td>${role}</td><td>${rttCell}</td><td>${quarantine}</td></tr>`;
   }).join("");
   return `<div class="provider-console-head"><div><h2>ChmlFrp API</h2><p>${esc(d.chmlfrp_health.message)}</p></div>${simpleBadge(connected ? "Connected" : (p?.chmlfrp_token_configured ? "Disconnected" : "未配置"), connected ? "ok" : (p?.chmlfrp_token_configured ? "bad" : ""))}</div>
-    <div class="actions resource-toolbar"><button id="chml-refresh">刷新资源</button><button id="chml-diag">API 诊断</button><button id="chml-create" ${connected ? "" : "disabled"}>+ 创建 ChmlFrp 隧道</button><button id="probe-nodes-btn" ${connected ? "" : "disabled"} title="按每个节点 /nodeinfo 真实 FRPS 端口并发 TCP 探针测速">测量全部节点</button>${!connected ? `<button data-goto="settings">前往设置</button>` : ""}</div>
+    <div class="actions resource-toolbar"><button id="chml-refresh">刷新资源</button><button id="chml-diag">API 诊断</button><button id="chml-create" ${connected ? "" : "disabled"}>+ 创建 ChmlFrp 隧道</button><button id="probe-nodes-btn" ${connected ? "" : "disabled"} title="按每个节点 /nodeinfo 真实 FRPS 端口并发 TCP 探针测速">测量全部节点</button><button id="switch-fastest-btn" ${connected && d.routing.active_node ? "" : "disabled"} title="测速并切换到最快合规节点；若当前已是最快则跳过不打断连接">测速并切至最快</button>${!connected ? `<button data-goto="settings">前往设置</button>` : ""}</div>
     ${renderDiagnostics(state.chmlDiagnostics, "chml")}
     <h2 class="section-title">远端隧道 <span class="count-pill">${state.remoteTunnels.length}</span></h2>
     <div class="table-wrap"><table><thead><tr><th>隧道</th><th>节点</th><th>协议</th><th>本地</th><th>外部</th><th>状态</th><th>纳管</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">${connected ? "未读取到隧道" : "请先配置 ChmlFrp"}</td></tr>`}</tbody></table></div>
@@ -447,12 +463,21 @@ function renderSettings() {
         <label>STANDBY 容忍带 (ms)<input id="probe-tolerance" type="number" min="0" max="5000" value="${esc(p.probe_latency_tolerance_ms ?? 50)}"></label>
         <label>最大允许 load1 负载阈值<input id="probe-max-load1" type="number" min="0.5" max="100" step="0.5" value="${esc(p.probe_max_load1 ?? 5)}"></label>
         <label>连续断线自动切换宽限期 (秒)<input id="probe-disconnect-grace" type="number" min="30" max="86400" value="${esc(p.failover_disconnect_grace_secs ?? 600)}"></label>
+        <label>每周自动择优最小提速阈值 (ms)<input id="weekly-min-gain" type="number" min="0" max="1000" step="1" value="${esc(p.weekly_optimize_min_improvement_ms ?? 15)}"></label>
       </div>
+      <div class="form-grid">
+        <label>每周择优星期 (UTC+8)<select id="weekly-weekday">${["周日","周一","周二","周三","周四","周五","周六"].map((label, idx) => `<option value="${idx}" ${(p.weekly_optimize_weekday ?? 0) === idx ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+        <label>每周择优小时 (0–23 点，UTC+8)<input id="weekly-hour" type="number" min="0" max="23" value="${esc(p.weekly_optimize_hour ?? 3)}"></label>
+      </div>
+      <label class="check compact-check"><input id="weekly-enabled" type="checkbox" ${p.weekly_optimize_enabled ?? true ? "checked" : ""}> 开启每周自动择优（默认每周日凌晨 3 点巡检；当前已最快则直接跳过不切）</label>
       <label class="check compact-check"><input id="probe-require-bw" type="checkbox" ${p.probe_require_high_bandwidth ?? true ? "checked" : ""}> 兼容网盘 / 大带宽（排除禁大流量、禁网盘、高峰限速节点）</label>
       <label class="check compact-check"><input id="probe-allow-icp" type="checkbox" ${!(p.probe_exclude_icp_required ?? false) ? "checked" : ""}> 允许需国内备案节点参与推荐（335356119.xyz 已备案建议勾选）</label>
       <label class="check compact-check"><input id="probe-exclude-wl" type="checkbox" ${p.probe_exclude_whitelist_and_ban_overseas ?? true ? "checked" : ""}> 排除需加群过白 / 封禁海外 IP 节点（避免 Cloudflare 与 ACME 回源失败）</label>
       <div class="provider-actions"><button type="button" id="probe-settings-save">保存探针与策略设置</button></div>
-      <p class="provider-note">探针自动使用各节点 /nodeinfo 中的真实 FRPS 端口（如 7000/7002/7100/8153），始终排除“被攻击/暂时无法使用”节点，并在可用节点中保持低延迟优先。</p>
+      <p class="provider-note">上次周巡检：${esc(p.last_weekly_optimize_at || "尚未执行")}。探针使用各节点真实 FRPS 端口并始终排除“被攻击/暂时无法使用”节点。</p>
+    </section>
+    <section class="settings-card"><div class="settings-card-head"><div><h2>控制面鉴权与 AI 自描述</h2><p>WebUI 与 /api/v1/* 强制校验 Control Center API Key；AI 可通过 GET /api/v1/capabilities 与 GET /llms.txt 自省全量能力。</p></div>${simpleBadge(p.control_api_key_configured ? "Protected" : "未配置", p.control_api_key_configured ? "ok" : "bad")}</div>
+      <div class="provider-actions"><button type="button" id="auth-rotate-btn" class="danger">轮换随机 API Key</button><button type="button" id="auth-copy-btn">复制当前 API Key</button><button type="button" id="ai-cap-btn">预览 AI /capabilities 摘要</button></div>
     </section>
     <section class="settings-card"><div class="settings-card-head"><div><h2>Cloudflare</h2><p>保存 Token/Zone 后立即验证；DNS 资源操作在“DNS”页面完成。</p></div>${cfBadge}</div>
       <label>API Base URL<input id="cf-base" value="${esc(p.cloudflare_api_base)}" autocomplete="off" spellcheck="false"></label>
@@ -646,6 +671,39 @@ function bindPageActions() {
       render();
     } catch (error) { setAlert("节点探针失败：" + error.message); }
   });
+  $("#switch-fastest-btn")?.addEventListener("click", async () => {
+    if (state.busy || !(await confirmAction("测速并切至最快合规节点", "将并发探测全部合规节点；若当前 ACTIVE 已是最快节点，则跳过不切换（不断开网盘）。继续？"))) return;
+    state.busy = true;
+    try {
+      setAlert("正在并发测速并评估是否需要切换至更快合规节点…", "info");
+      const res = await api("/api/v1/nodes/switch-fastest", { method: "POST", body: JSON.stringify({ dry_run: false, min_improvement_ms: 0 }) });
+      setAlert(res.reason, res.switched ? "info" : "info");
+      if (res.switched) await Promise.all([refresh(), loadNodes(), loadRemoteTunnels(), loadDnsRecords()]);
+      render();
+    } catch (error) { setAlert("择优切换失败：" + error.message); } finally { state.busy = false; }
+  });
+  $("#auth-rotate-btn")?.addEventListener("click", async () => {
+    if (!(await confirmAction("轮换 Control API Key", "轮换后旧 API Key 立即失效，AI 脚本与浏览器需使用新 Key。继续？"))) return;
+    try {
+      const res = await api("/api/v1/auth/key", { method: "PUT", body: "{}" });
+      state.apiKey = res.api_key;
+      localStorage.setItem(AUTH_STORAGE_KEY, res.api_key);
+      connectEvents();
+      setAlert(`已轮换新 API Key（请妥善保存）：${res.api_key}`, "info");
+      await loadProviderSettings();
+      render();
+    } catch (error) { setAlert("轮换 API Key 失败：" + error.message); }
+  });
+  $("#auth-copy-btn")?.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(state.apiKey || ""); setAlert("当前 API Key 已复制到剪贴板。", "info"); }
+    catch { setAlert(`当前 API Key：${state.apiKey || "未解锁"}`, "info"); }
+  });
+  $("#ai-cap-btn")?.addEventListener("click", async () => {
+    try {
+      const cap = await api("/api/v1/capabilities");
+      setAlert(`AI /capabilities 正常：共 ${cap.endpoints?.length ?? 0} 个接口，ACTIVE=${cap.current_state?.active_node || "无"}，require_web=${cap.current_state?.require_web}`, "info");
+    } catch (error) { setAlert(error.message); }
+  });
   $("#chml-diag")?.addEventListener("click", async () => {
     try { state.chmlDiagnostics = await api("/api/v1/chmlfrp/diagnostics", { method: "POST" }); render(); } catch (error) { setAlert(error.message); }
   });
@@ -777,6 +835,10 @@ function buildProviderUpdatePayload(overrides = {}) {
     probe_exclude_whitelist_and_ban_overseas: p.probe_exclude_whitelist_and_ban_overseas ?? true,
     probe_max_load1: p.probe_max_load1 ?? 5.0,
     failover_disconnect_grace_secs: p.failover_disconnect_grace_secs ?? 600,
+    weekly_optimize_enabled: p.weekly_optimize_enabled ?? true,
+    weekly_optimize_weekday: p.weekly_optimize_weekday ?? 0,
+    weekly_optimize_hour: p.weekly_optimize_hour ?? 3,
+    weekly_optimize_min_improvement_ms: p.weekly_optimize_min_improvement_ms ?? 15.0,
     ...overrides,
   };
 }
@@ -824,10 +886,13 @@ async function saveProbeSettings() {
   const probeTolerance = Number($("#probe-tolerance").value);
   const maxLoad1 = Number($("#probe-max-load1").value);
   const graceSecs = Number($("#probe-disconnect-grace").value);
+  const weeklyHour = Number($("#weekly-hour").value);
+  const weeklyMinGain = Number($("#weekly-min-gain").value);
   if (!probePort || probePort < 1 || probePort > 65535) { setAlert("探针端口必须在 1-65535 之间"); return; }
   if (!probeTimeout || probeTimeout < 100) { setAlert("超时不能小于 100ms"); return; }
   if (!maxLoad1 || maxLoad1 < 0.5) { setAlert("最大 load1 负载阈值不能小于 0.5"); return; }
   if (!graceSecs || graceSecs < 30) { setAlert("断线宽限期不能小于 30 秒"); return; }
+  if (Number.isNaN(weeklyHour) || weeklyHour < 0 || weeklyHour > 23) { setAlert("周巡检小时必须在 0-23 之间"); return; }
   const body = buildProviderUpdatePayload({
     probe_port: probePort,
     probe_timeout_ms: probeTimeout,
@@ -837,6 +902,10 @@ async function saveProbeSettings() {
     probe_exclude_whitelist_and_ban_overseas: $("#probe-exclude-wl").checked,
     probe_max_load1: maxLoad1,
     failover_disconnect_grace_secs: graceSecs,
+    weekly_optimize_enabled: $("#weekly-enabled").checked,
+    weekly_optimize_weekday: Number($("#weekly-weekday").value),
+    weekly_optimize_hour: weeklyHour,
+    weekly_optimize_min_improvement_ms: Math.max(0, weeklyMinGain || 0),
   });
   try {
     state.providerSettings = await api("/api/v1/settings/providers", { method: "PUT", body: JSON.stringify(body) });
@@ -954,15 +1023,52 @@ $("#failover-btn").addEventListener("click", async () => {
   try { const result = await api("/api/v1/failover", { method: "POST" }); setAlert(`GLOBAL FAILOVER 完成：${result.job_id}`, "info"); await Promise.all([refresh(), loadRemoteTunnels(), loadDnsRecords(), loadNodes()]); render(); } catch (error) { setAlert(error.message); } finally { state.busy = false; }
 });
 
-try {
-  const source = new EventSource("/api/v1/events");
-  source.addEventListener("frpc", (event) => {
-    try { state.logs.push(JSON.parse(event.data)); state.logs = state.logs.slice(-500); if (state.page === "frpc") render(); } catch { /* ignore */ }
-  });
-} catch { /* polling remains available */ }
+function connectEvents() {
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+  if (!state.apiKey) return;
+  try {
+    const source = new EventSource(`/api/v1/events?api_key=${encodeURIComponent(state.apiKey)}`);
+    source.addEventListener("frpc", (event) => {
+      try { state.logs.push(JSON.parse(event.data)); state.logs = state.logs.slice(-500); if (state.page === "frpc") render(); } catch { /* ignore */ }
+    });
+    state.eventSource = source;
+  } catch { /* polling remains available */ }
+}
 
-await loadProviderSettings();
-await refresh();
-await Promise.all([loadNodes(), loadRemoteTunnels(), loadDnsRecords(), loadLogs()]);
-render();
-setInterval(refresh, 15000);
+async function bootstrapAuthenticatedSession() {
+  connectEvents();
+  await loadProviderSettings();
+  await refresh();
+  await Promise.all([loadNodes(), loadRemoteTunnels(), loadDnsRecords(), loadLogs()]);
+  render();
+  if (!state.pollTimer) state.pollTimer = setInterval(() => { if (state.apiKey) refresh(); }, 15000);
+}
+
+$("#auth-lock-btn")?.addEventListener("click", () => showAuthGate("请输入或更换 Control Center API Key"));
+$("#auth-dialog")?.addEventListener("cancel", (event) => {
+  if (!state.apiKey) event.preventDefault();
+});
+$("#auth-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const key = $("#auth-key-input").value.trim();
+  if (!key) { $("#auth-error").textContent = "请输入 API Key"; return; }
+  try {
+    await api("/api/v1/auth/verify", { method: "POST", body: JSON.stringify({ api_key: key }) });
+    state.apiKey = key;
+    localStorage.setItem(AUTH_STORAGE_KEY, key);
+    $("#auth-error").textContent = "";
+    $("#auth-dialog").close();
+    await bootstrapAuthenticatedSession();
+  } catch (error) {
+    $("#auth-error").textContent = error.message || "API Key 无效";
+  }
+});
+
+if (state.apiKey) {
+  await bootstrapAuthenticatedSession();
+} else {
+  showAuthGate();
+}

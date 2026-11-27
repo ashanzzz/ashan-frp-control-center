@@ -24,6 +24,7 @@ pub struct AppConfig {
     pub standby_node: Option<String>,
     pub quarantine_days: i64,
     pub failover_enabled: bool,
+    pub control_api_key: Option<String>,
 }
 
 impl AppConfig {
@@ -59,6 +60,7 @@ impl AppConfig {
             standby_node: optional("STANDBY_NODE"),
             quarantine_days,
             failover_enabled: parse_env("FAILOVER_ENABLED", true)?,
+            control_api_key: optional("CONTROL_API_KEY"),
         })
     }
 }
@@ -91,4 +93,5 @@ pub struct AppState {
     pub cf: CloudflareClient,
     pub frpc: FrpcManager,
     pub failover_job: Arc<RwLock<Option<String>>>,
+    pub control_api_key: Arc<RwLock<String>>,
 }

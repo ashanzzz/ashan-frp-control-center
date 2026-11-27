@@ -47,6 +47,20 @@ async fn main() -> Result<()> {
     )
     .await?;
     let providers = db.provider_settings().await?;
+    let generated_fallback = format!(
+        "ashan_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let key_seed = config
+        .control_api_key
+        .as_deref()
+        .unwrap_or(&generated_fallback);
+    let was_empty = providers.control_api_key.trim().is_empty();
+    let control_api_key = db.ensure_control_api_key(key_seed).await?;
+    if was_empty && config.control_api_key.is_none() {
+        warn!("auto-generated Control Center API key in SQLite provider_settings.control_api_key");
+    }
 
     let state = Arc::new(AppState {
         db,
@@ -70,6 +84,7 @@ async fn main() -> Result<()> {
             config.frpc_log_tail,
         ),
         failover_job: Arc::new(RwLock::new(None)),
+        control_api_key: Arc::new(RwLock::new(control_api_key)),
     });
     let db_for_hook = state.db.clone();
     state.chml.set_token_persister(Arc::new(move |bundle| {
@@ -86,6 +101,7 @@ async fn main() -> Result<()> {
     let coordinator = Coordinator::new(state.clone());
     coordinator.spawn_frpc_fault_watcher();
     coordinator.spawn_disconnect_watchdog();
+    coordinator.spawn_weekly_speed_optimizer();
 
     restore_frpc_if_possible(&state, &config).await;
 

@@ -3,7 +3,7 @@ use ashan_frp_domain::{
     ActivityEvent, ProviderSettingsUpdate, ProviderSettingsView, RoutingPhase, RoutingState,
     RoutingUpdate, TunnelPlan, TunnelPlanInput,
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use serde_json::Value;
 use sqlx::{
     Row, SqlitePool,
@@ -37,6 +37,12 @@ pub struct ProviderSettings {
     pub probe_exclude_whitelist_and_ban_overseas: bool,
     pub probe_max_load1: f64,
     pub failover_disconnect_grace_secs: i64,
+    pub control_api_key: String,
+    pub weekly_optimize_enabled: bool,
+    pub weekly_optimize_weekday: i64,
+    pub weekly_optimize_hour: i64,
+    pub weekly_optimize_min_improvement_ms: f64,
+    pub last_weekly_optimize_at: String,
 }
 
 impl ProviderSettings {
@@ -61,6 +67,12 @@ impl ProviderSettings {
             probe_exclude_whitelist_and_ban_overseas: self.probe_exclude_whitelist_and_ban_overseas,
             probe_max_load1: self.probe_max_load1,
             failover_disconnect_grace_secs: self.failover_disconnect_grace_secs.max(30) as u64,
+            control_api_key_configured: !self.control_api_key.trim().is_empty(),
+            weekly_optimize_enabled: self.weekly_optimize_enabled,
+            weekly_optimize_weekday: self.weekly_optimize_weekday.clamp(0, 6) as u8,
+            weekly_optimize_hour: self.weekly_optimize_hour.clamp(0, 23) as u8,
+            weekly_optimize_min_improvement_ms: self.weekly_optimize_min_improvement_ms.max(0.0),
+            last_weekly_optimize_at: self.last_weekly_optimize_at.clone(),
         }
     }
 }
@@ -107,7 +119,9 @@ impl Database {
              probe_port,probe_timeout_ms,probe_latency_tolerance_ms,\
              probe_require_high_bandwidth,probe_exclude_icp_required,\
              probe_exclude_whitelist_and_ban_overseas,probe_max_load1,\
-             failover_disconnect_grace_secs \
+             failover_disconnect_grace_secs,\
+             control_api_key,weekly_optimize_enabled,weekly_optimize_weekday,\
+             weekly_optimize_hour,weekly_optimize_min_improvement_ms,last_weekly_optimize_at \
              FROM provider_settings WHERE singleton_id=1",
         )
         .fetch_one(&self.pool)
@@ -134,7 +148,57 @@ impl Database {
                 != 0,
             probe_max_load1: row.get("probe_max_load1"),
             failover_disconnect_grace_secs: row.get("failover_disconnect_grace_secs"),
+            control_api_key: row.get("control_api_key"),
+            weekly_optimize_enabled: row.get::<i64, _>("weekly_optimize_enabled") != 0,
+            weekly_optimize_weekday: row.get("weekly_optimize_weekday"),
+            weekly_optimize_hour: row.get("weekly_optimize_hour"),
+            weekly_optimize_min_improvement_ms: row.get("weekly_optimize_min_improvement_ms"),
+            last_weekly_optimize_at: row.get("last_weekly_optimize_at"),
         })
+    }
+
+    pub async fn ensure_control_api_key(&self, seed_or_generated: &str) -> Result<String> {
+        let existing: String = sqlx::query_scalar(
+            "SELECT control_api_key FROM provider_settings WHERE singleton_id=1",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_owned());
+        }
+        let next = seed_or_generated.trim();
+        anyhow::ensure!(!next.is_empty(), "control_api_key cannot be empty");
+        sqlx::query(
+            "UPDATE provider_settings SET control_api_key=?,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
+        )
+        .bind(next)
+        .execute(&self.pool)
+        .await?;
+        Ok(next.to_owned())
+    }
+
+    pub async fn set_control_api_key(&self, new_key: &str) -> Result<()> {
+        let trimmed = new_key.trim();
+        anyhow::ensure!(
+            trimmed.len() >= 12,
+            "Control API Key length must be at least 12 characters"
+        );
+        sqlx::query(
+            "UPDATE provider_settings SET control_api_key=?,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
+        )
+        .bind(trimmed)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_weekly_optimize_ran(&self, timestamp_rfc3339: &str) -> Result<()> {
+        sqlx::query("UPDATE provider_settings SET last_weekly_optimize_at=? WHERE singleton_id=1")
+            .bind(timestamp_rfc3339)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Persist refreshed or newly logged-in ChmlFrp SSO tokens.
@@ -283,6 +347,8 @@ impl Database {
              probe_require_high_bandwidth=?,probe_exclude_icp_required=?,\
              probe_exclude_whitelist_and_ban_overseas=?,probe_max_load1=?,\
              failover_disconnect_grace_secs=?,\
+             weekly_optimize_enabled=?,weekly_optimize_weekday=?,\
+             weekly_optimize_hour=?,weekly_optimize_min_improvement_ms=?,\
              env_bootstrap_complete=1,updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1",
         )
         .bind(input.chmlfrp_base_url.trim().trim_end_matches('/'))
@@ -303,6 +369,10 @@ impl Database {
         .bind(input.probe_exclude_whitelist_and_ban_overseas as i64)
         .bind(input.probe_max_load1.max(0.5))
         .bind(input.failover_disconnect_grace_secs.max(30) as i64)
+        .bind(input.weekly_optimize_enabled as i64)
+        .bind((input.weekly_optimize_weekday % 7) as i64)
+        .bind((input.weekly_optimize_hour % 24) as i64)
+        .bind(input.weekly_optimize_min_improvement_ms.max(0.0))
         .execute(&self.pool)
         .await?;
         self.provider_settings().await
@@ -611,4 +681,26 @@ fn row_to_tunnel(row: sqlx::sqlite::SqliteRow) -> TunnelPlan {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
+}
+
+/// Return current Asia/Shanghai (UTC+8) weekday (`0=Sun..6=Sat`), hour (`0..23`),
+/// and UTC RFC3339 timestamp for weekly schedule evaluation.
+pub fn shanghai_weekday_hour_and_rfc3339() -> (u8, u8, String) {
+    let now = Utc::now();
+    let cst = now + Duration::hours(8);
+    (
+        cst.weekday().num_days_from_sunday() as u8,
+        cst.hour() as u8,
+        now.to_rfc3339(),
+    )
+}
+
+/// Return whole hours elapsed since `rfc3339`, or `None` if blank/unparseable.
+pub fn hours_since_rfc3339(rfc3339: &str) -> Option<i64> {
+    let trimmed = rfc3339.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = DateTime::parse_from_rfc3339(trimmed).ok()?;
+    Some((Utc::now() - parsed.with_timezone(&Utc)).num_hours())
 }

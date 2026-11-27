@@ -34,6 +34,7 @@
         <div class="actions global-actions">
           <button id="reconcile-btn">全局同步</button>
           <button id="failover-btn" class="danger">手动 GLOBAL FAILOVER</button>
+          <button id="auth-lock-btn" class="ghost" title="重新输入或更换 Control Center API Key">API Key</button>
         </div>
       </header>
       <div id="alert"></div>
@@ -133,6 +134,16 @@
       <h2 id="confirm-title">确认操作</h2>
       <p id="confirm-message"></p>
       <div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button id="confirm-ok" value="default" class="danger">确认</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="auth-dialog">
+    <form id="auth-form" method="dialog">
+      <h2>Control Center 鉴权验证</h2>
+      <p class="muted">本控制中心已启用强制 API Key 鉴权。请输入控制面 API Key（仅保存在当前浏览器 localStorage）。</p>
+      <label>Control API Key<input id="auth-key-input" type="password" required autocomplete="current-password" placeholder="ashan_..."></label>
+      <div id="auth-error" class="form-error"></div>
+      <div class="dialog-actions"><button type="submit">验证并解锁</button></div>
     </form>
   </dialog>
 </body>

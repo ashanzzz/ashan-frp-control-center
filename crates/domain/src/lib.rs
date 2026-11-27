@@ -396,6 +396,12 @@ pub struct ProviderSettingsView {
     pub probe_exclude_whitelist_and_ban_overseas: bool,
     pub probe_max_load1: f64,
     pub failover_disconnect_grace_secs: u64,
+    pub control_api_key_configured: bool,
+    pub weekly_optimize_enabled: bool,
+    pub weekly_optimize_weekday: u8,
+    pub weekly_optimize_hour: u8,
+    pub weekly_optimize_min_improvement_ms: f64,
+    pub last_weekly_optimize_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -437,6 +443,98 @@ pub struct ProviderSettingsUpdate {
     pub probe_max_load1: f64,
     #[serde(default = "default_failover_disconnect_grace_secs")]
     pub failover_disconnect_grace_secs: u64,
+    #[serde(default = "default_true")]
+    pub weekly_optimize_enabled: bool,
+    #[serde(default)]
+    pub weekly_optimize_weekday: u8,
+    #[serde(default = "default_weekly_optimize_hour")]
+    pub weekly_optimize_hour: u8,
+    #[serde(default = "default_weekly_min_improvement_ms")]
+    pub weekly_optimize_min_improvement_ms: f64,
+}
+
+/// Partial update payload for `PATCH /api/v1/settings/providers` (AI- & script-friendly).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProviderSettingsPatch {
+    pub chmlfrp_base_url: Option<String>,
+    pub chmlfrp_token: Option<String>,
+    pub clear_chmlfrp_token: Option<bool>,
+    pub chmlfrp_refresh_token: Option<String>,
+    pub chmlfrp_username: Option<String>,
+    pub chmlfrp_password: Option<String>,
+    pub chmlfrp_totp_secret: Option<String>,
+    pub clear_chmlfrp_credentials: Option<bool>,
+    pub cloudflare_api_base: Option<String>,
+    pub cloudflare_api_token: Option<String>,
+    pub clear_cloudflare_api_token: Option<bool>,
+    pub cloudflare_zone_id: Option<String>,
+    pub probe_port: Option<u16>,
+    pub probe_timeout_ms: Option<u64>,
+    pub probe_latency_tolerance_ms: Option<u64>,
+    pub probe_require_high_bandwidth: Option<bool>,
+    pub probe_exclude_icp_required: Option<bool>,
+    pub probe_exclude_whitelist_and_ban_overseas: Option<bool>,
+    pub probe_max_load1: Option<f64>,
+    pub failover_disconnect_grace_secs: Option<u64>,
+    pub weekly_optimize_enabled: Option<bool>,
+    pub weekly_optimize_weekday: Option<u8>,
+    pub weekly_optimize_hour: Option<u8>,
+    pub weekly_optimize_min_improvement_ms: Option<f64>,
+}
+
+impl ProviderSettingsPatch {
+    pub fn into_update(self, current: &ProviderSettingsView) -> ProviderSettingsUpdate {
+        ProviderSettingsUpdate {
+            chmlfrp_base_url: self
+                .chmlfrp_base_url
+                .unwrap_or_else(|| current.chmlfrp_base_url.clone()),
+            chmlfrp_token: self.chmlfrp_token,
+            clear_chmlfrp_token: self.clear_chmlfrp_token.unwrap_or(false),
+            chmlfrp_refresh_token: self.chmlfrp_refresh_token,
+            chmlfrp_username: self.chmlfrp_username,
+            chmlfrp_password: self.chmlfrp_password,
+            chmlfrp_totp_secret: self.chmlfrp_totp_secret,
+            clear_chmlfrp_credentials: self.clear_chmlfrp_credentials.unwrap_or(false),
+            cloudflare_api_base: self
+                .cloudflare_api_base
+                .unwrap_or_else(|| current.cloudflare_api_base.clone()),
+            cloudflare_api_token: self.cloudflare_api_token,
+            clear_cloudflare_api_token: self.clear_cloudflare_api_token.unwrap_or(false),
+            cloudflare_zone_id: self
+                .cloudflare_zone_id
+                .unwrap_or_else(|| current.cloudflare_zone_id.clone()),
+            probe_port: self.probe_port.unwrap_or(current.probe_port),
+            probe_timeout_ms: self.probe_timeout_ms.unwrap_or(current.probe_timeout_ms),
+            probe_latency_tolerance_ms: self
+                .probe_latency_tolerance_ms
+                .unwrap_or(current.probe_latency_tolerance_ms),
+            probe_require_high_bandwidth: self
+                .probe_require_high_bandwidth
+                .unwrap_or(current.probe_require_high_bandwidth),
+            probe_exclude_icp_required: self
+                .probe_exclude_icp_required
+                .unwrap_or(current.probe_exclude_icp_required),
+            probe_exclude_whitelist_and_ban_overseas: self
+                .probe_exclude_whitelist_and_ban_overseas
+                .unwrap_or(current.probe_exclude_whitelist_and_ban_overseas),
+            probe_max_load1: self.probe_max_load1.unwrap_or(current.probe_max_load1),
+            failover_disconnect_grace_secs: self
+                .failover_disconnect_grace_secs
+                .unwrap_or(current.failover_disconnect_grace_secs),
+            weekly_optimize_enabled: self
+                .weekly_optimize_enabled
+                .unwrap_or(current.weekly_optimize_enabled),
+            weekly_optimize_weekday: self
+                .weekly_optimize_weekday
+                .unwrap_or(current.weekly_optimize_weekday),
+            weekly_optimize_hour: self
+                .weekly_optimize_hour
+                .unwrap_or(current.weekly_optimize_hour),
+            weekly_optimize_min_improvement_ms: self
+                .weekly_optimize_min_improvement_ms
+                .unwrap_or(current.weekly_optimize_min_improvement_ms),
+        }
+    }
 }
 
 fn default_probe_port() -> u16 {
@@ -456,6 +554,12 @@ fn default_probe_max_load1() -> f64 {
 }
 fn default_failover_disconnect_grace_secs() -> u64 {
     600
+}
+fn default_weekly_optimize_hour() -> u8 {
+    3
+}
+fn default_weekly_min_improvement_ms() -> f64 {
+    15.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
