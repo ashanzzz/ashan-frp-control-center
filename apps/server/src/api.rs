@@ -639,29 +639,15 @@ async fn sso_login_chmlfrp(
             .is_some_and(|v| !v.trim().is_empty());
 
     if has_override {
-        let update = ProviderSettingsUpdate {
-            chmlfrp_base_url: base_url,
-            chmlfrp_token: None,
-            clear_chmlfrp_token: false,
-            chmlfrp_refresh_token: None,
+        let view = saved.view();
+        let update = ProviderSettingsPatch {
+            chmlfrp_base_url: Some(base_url),
             chmlfrp_username: input.username,
             chmlfrp_password: input.password,
             chmlfrp_totp_secret: input.totp_secret,
-            clear_chmlfrp_credentials: false,
-            cloudflare_api_base: saved.cloudflare_api_base,
-            cloudflare_api_token: None,
-            clear_cloudflare_api_token: false,
-            cloudflare_zone_id: saved.cloudflare_zone_id,
-            probe_port: saved.probe_port.clamp(1, 65535) as u16,
-            probe_timeout_ms: saved.probe_timeout_ms.max(100) as u64,
-            probe_latency_tolerance_ms: saved.probe_latency_tolerance_ms.max(0) as u64,
-            probe_require_high_bandwidth: saved.probe_require_high_bandwidth,
-            probe_exclude_icp_required: saved.probe_exclude_icp_required,
-            probe_exclude_whitelist_and_ban_overseas: saved
-                .probe_exclude_whitelist_and_ban_overseas,
-            probe_max_load1: saved.probe_max_load1,
-            failover_disconnect_grace_secs: saved.failover_disconnect_grace_secs.max(30) as u64,
-        };
+            ..Default::default()
+        }
+        .into_update(&view);
         if let Err(err) = state.coordinator.apply_provider_settings(&update).await {
             return match err {
                 ProviderSettingsApplyError::Busy => Err(ApiError::conflict(
