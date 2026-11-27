@@ -14,3 +14,6 @@ __pycache__/
 *.pyc
 *.zip
 ashan-frp-control-center-*
+
+scripts/run_cargo.ps1
+cargo_exec.log
